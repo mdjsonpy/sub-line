@@ -1,0 +1,33 @@
+[Icon Theme]
+Name=Hicolor (user)
+Comment=Per-user application icons
+Directories=64x64/apps,128x128/apps,256x256/apps,512x512/apps,scalable/apps
+
+[64x64/apps]
+Size=64
+Context=Applications
+Type=Threshold
+
+[128x128/apps]
+Size=128
+Context=Applications
+Type=Threshold
+
+[256x256/apps]
+MinSize=64
+Size=256
+Context=Applications
+Type=Scalable
+
+[512x512/apps]
+MinSize=64
+Size=512
+Context=Applications
+Type=Scalable
+
+[scalable/apps]
+MinSize=1
+Size=128
+MaxSize=256
+Context=Applications
+Type=Scalable
