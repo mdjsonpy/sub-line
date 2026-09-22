@@ -11,7 +11,6 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QColor,
-    QPen,
     QPainter,
 )
 import chardet
@@ -181,9 +180,8 @@ class EditorPane(QPlainTextEdit):
         space_fmt.setForeground(_WS_COLOR)
         tab_fmt = QTextCharFormat()
         tab_fmt.setForeground(_WS_COLOR)
-        pen = QPen(_WS_COLOR)
-        pen.setStyle(Qt.DashLine)
-        tab_fmt.setPen(pen)
+        tab_fmt.setFontUnderline(True)
+        tab_fmt.setUnderlineColor(_WS_COLOR)
         while block.isValid():
             text = block.text()
             # trailing whitespace
@@ -209,9 +207,12 @@ class EditorPane(QPlainTextEdit):
 
     # --- tab / indent ----------------------------------------------------------
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
-            self._handle_tab(event.key() == Qt.Key_Backtab)
-            return
+        k = event.key()
+        if k in (Qt.Key_Tab, Qt.Key_Backtab):
+            # plain Tab / Shift+Tab only; let Ctrl+Tab (tab switching) pass through
+            if not event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+                self._handle_tab(k == Qt.Key_Backtab or bool(event.modifiers() & Qt.ShiftModifier))
+                return
         super().keyPressEvent(event)
 
     def _handle_tab(self, back: bool) -> None:
@@ -219,15 +220,17 @@ class EditorPane(QPlainTextEdit):
             self._dedent_line()
             return
         cursor = self.textCursor()
-        if cursor.hasSelection() and cursor.selectionStartBlock() != cursor.selectionEndBlock():
+        doc = self.document()
+        if cursor.hasSelection() and self._block_number(doc, cursor.selectionStart()) != self._block_number(doc, cursor.selectionEnd()):
             self._indent_selection()
         else:
-            self.insert(TAB_SIZE * " ")
+            self.insertPlainText(TAB_SIZE * " ")
 
     def _indent_selection(self) -> None:
         cursor = self.textCursor()
-        start_block = cursor.selectionStartBlock()
-        end_block = cursor.selectionEndBlock()
+        doc = self.document()
+        start_block = self._block_number(doc, cursor.selectionStart())
+        end_block = self._block_number(doc, cursor.selectionEnd())
         cursor.clearSelection()
         for bn in range(end_block, start_block - 1, -1):
             block = self.document().findBlockByNumber(bn)
@@ -235,6 +238,12 @@ class EditorPane(QPlainTextEdit):
                 c = QTextCursor(block)
                 c.insertText(TAB_SIZE * " ")
         self.setTextCursor(cursor)
+
+    @staticmethod
+    def _block_number(doc, position: int) -> int:
+        c = QTextCursor(doc)
+        c.setPosition(position)
+        return c.blockNumber()
 
     def _dedent_line(self) -> None:
         cursor = self.textCursor()

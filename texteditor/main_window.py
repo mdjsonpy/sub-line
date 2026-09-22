@@ -143,6 +143,8 @@ class MainWindow(QMainWindow):
         self._act("zoom_in", "Zoom In", self.zoom_in, "Ctrl+=")
         self._act("zoom_out", "Zoom Out", self.zoom_out, "Ctrl+-")
         self._act("zoom_reset", "Reset Zoom", self.zoom_reset, "Ctrl+0")
+        self._act("next_tab", "Next Tab", self.next_tab, "Ctrl+Tab")
+        self._act("prev_tab", "Previous Tab", self.previous_tab, "Ctrl+Shift+Tab")
         self._act("sidebar", "Toggle Sidebar", self.toggle_sidebar, "Ctrl+B", checkable=True)
         self._actions["sidebar"].setChecked(True)
         view_menu.addAction(self._actions["wrap"])
@@ -151,6 +153,9 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._actions["zoom_in"])
         view_menu.addAction(self._actions["zoom_out"])
         view_menu.addAction(self._actions["zoom_reset"])
+        view_menu.addSeparator()
+        view_menu.addAction(self._actions["next_tab"])
+        view_menu.addAction(self._actions["prev_tab"])
         view_menu.addSeparator()
         view_menu.addAction(self._actions["sidebar"])
         mb.addMenu(view_menu)
@@ -633,6 +638,16 @@ class MainWindow(QMainWindow):
         if self._view.tab_count():
             self._view.close_active_tab()
             self._schedule_save()
+
+    def next_tab(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.cycle_tab(1)
+
+    def previous_tab(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.cycle_tab(-1)
 
     def save(self) -> None:
         if self.current_workspace() is None:

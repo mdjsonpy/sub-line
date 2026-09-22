@@ -289,6 +289,13 @@ class WorkspaceView(QWidget):
         if group.count():
             self.request_close_tab(group.currentIndex(), group)
 
+    def cycle_tab(self, step: int) -> None:
+        """Move to the next/previous tab in the active group (wrapping)."""
+        group = self.active_group()
+        n = group.count()
+        if n > 1:
+            group.setCurrentIndex((group.currentIndex() + step) % n)
+
     def _remove_tab(self, group: QTabWidget, index: int) -> None:
         pane = group.widget(index)
         if pane is None:
