@@ -1,0 +1,758 @@
+"""Main application window: menu bar, workspaces list, single editor area, persistence."""
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import uuid
+
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QSplitter,
+    QFileDialog,
+    QMessageBox,
+    QInputDialog,
+    QMenu,
+)
+from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QTimer
+
+from . import APP_DISPLAY_NAME, __version__
+from .theme import Theme
+from .workspace import WorkspaceView
+from .workspace_list import WorkspaceList
+from .editor_view import EditorPane
+from .store import Workspace, WorkspacesStore, LayoutEntry, StoreData
+from .todos_pane import TodosPane
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, theme: Theme, store: WorkspacesStore) -> None:
+        super().__init__()
+        self._theme = theme
+        self._store = store
+        self._workspaces: list[Workspace] = []
+        self._by_id: dict[str, Workspace] = {}
+        self._layout: list[LayoutEntry] = []
+        self._collapsed: set[str] = set()
+        self._current_index: int = -1
+        self._actions: dict[str, QAction] = {}
+
+        self.setWindowTitle(APP_DISPLAY_NAME)
+        self.resize(1100, 720)
+
+        self._view = WorkspaceView(None, self._theme)
+        self._ws_list = WorkspaceList()
+
+        self._split = QSplitter(Qt.Horizontal)
+        self._split.addWidget(self._ws_list)
+        self._split.addWidget(self._view)
+        self._split.setChildrenCollapsible(False)
+        self._split.setSizes([200, 900])
+        self.setCentralWidget(self._split)
+
+        self._ws_list.activated.connect(self.activate_workspace)
+        self._ws_list.closeRequested.connect(self.close_workspace)
+        self._ws_list.newRequested.connect(self.new_workspace)
+        self._ws_list.renameRequested.connect(self.rename_workspace)
+        self._ws_list.openFolderRequested.connect(self.open_in_explorer)
+        self._ws_list.openTerminalRequested.connect(self.open_terminal)
+        self._ws_list.moveUpRequested.connect(self.move_workspace_up)
+        self._ws_list.moveDownRequested.connect(self.move_workspace_down)
+        self._ws_list.moveToCategoryRequested.connect(self.move_workspace_to_category)
+        self._ws_list.newCategoryRequested.connect(self.new_category)
+        self._ws_list.renameCategoryRequested.connect(self.rename_category)
+        self._ws_list.deleteCategoryRequested.connect(self.delete_category)
+        self._ws_list.categoryUpRequested.connect(self.move_category_up)
+        self._ws_list.categoryDownRequested.connect(self.move_category_down)
+        self._view.tree.toggleWorkspacesRequested.connect(self.toggle_workspaces)
+        self._view.tabsChanged.connect(self._schedule_save)
+
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(600)
+        self._save_timer.timeout.connect(self._save_state)
+
+        self._build_menus()
+        self._load_workspaces()
+
+    # --- action factory --------------------------------------------------------
+    def _act(self, key: str, text: str, slot, shortcut: str | None = None, checkable: bool = False) -> QAction:
+        act = QAction(text, self)
+        if shortcut:
+            act.setShortcut(shortcut)
+        act.setCheckable(checkable)
+        act.triggered.connect(slot)
+        self.addAction(act)
+        self._actions[key] = act
+        return act
+
+    def _build_menus(self) -> None:
+        mb = self.menuBar()
+
+        # ---- File ----
+        file_menu = QMenu("File", self)
+        self._act("new_file", "New File", self.new_file, "Ctrl+N")
+        self._act("open_file", "Open…", self.open_file_dialog, "Ctrl+O")
+        self._act("new_ws", "New Workspace…", self.new_workspace)
+        self._act("save", "Save", self.save, "Ctrl+S")
+        self._act("save_all", "Save All", self.save_all, "Ctrl+Shift+S")
+        self._act("close_tab", "Close Tab", self.close_tab, "Ctrl+W")
+        self._act("close_ws", "Close Workspace", self.close_current_workspace)
+        self._act("quit", "Quit", self.close, "Ctrl+Q")
+
+        file_menu.addAction(self._actions["new_file"])
+        file_menu.addAction(self._actions["open_file"])
+        file_menu.addAction(self._actions["new_ws"])
+        file_menu.addSeparator()
+        file_menu.addAction(self._actions["save"])
+        file_menu.addAction(self._actions["save_all"])
+        file_menu.addAction(self._actions["close_tab"])
+        file_menu.addAction(self._actions["close_ws"])
+        file_menu.addSeparator()
+        file_menu.addAction(self._actions["quit"])
+        mb.addMenu(file_menu)
+
+        # ---- Edit ----
+        edit_menu = QMenu("Edit", self)
+        self._act("undo", "Undo", self.undo, "Ctrl+Z")
+        self._act("redo", "Redo", self.redo, "Ctrl+Shift+Z")
+        self._act("cut", "Cut", self.cut, "Ctrl+X")
+        self._act("copy", "Copy", self.copy, "Ctrl+C")
+        self._act("paste", "Paste", self.paste, "Ctrl+V")
+        self._act("select_all", "Select All", self.select_all, "Ctrl+A")
+        self._act("find", "Find", self.show_find, "Ctrl+F")
+        edit_menu.addAction(self._actions["undo"])
+        edit_menu.addAction(self._actions["redo"])
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._actions["cut"])
+        edit_menu.addAction(self._actions["copy"])
+        edit_menu.addAction(self._actions["paste"])
+        edit_menu.addAction(self._actions["select_all"])
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._actions["find"])
+        mb.addMenu(edit_menu)
+
+        # ---- View ----
+        view_menu = QMenu("View", self)
+        self._act("wrap", "Toggle Word Wrap", self.toggle_wrap, "Ctrl+Shift+V", checkable=True)
+        self._actions["wrap"].setChecked(True)
+        self._act("whitespace", "Toggle Whitespace", self.toggle_whitespace, checkable=True)
+        self._act("zoom_in", "Zoom In", self.zoom_in, "Ctrl+=")
+        self._act("zoom_out", "Zoom Out", self.zoom_out, "Ctrl+-")
+        self._act("zoom_reset", "Reset Zoom", self.zoom_reset, "Ctrl+0")
+        self._act("sidebar", "Toggle Sidebar", self.toggle_sidebar, "Ctrl+B", checkable=True)
+        self._actions["sidebar"].setChecked(True)
+        view_menu.addAction(self._actions["wrap"])
+        view_menu.addAction(self._actions["whitespace"])
+        view_menu.addSeparator()
+        view_menu.addAction(self._actions["zoom_in"])
+        view_menu.addAction(self._actions["zoom_out"])
+        view_menu.addAction(self._actions["zoom_reset"])
+        view_menu.addSeparator()
+        view_menu.addAction(self._actions["sidebar"])
+        mb.addMenu(view_menu)
+
+        # ---- Todos ----
+        todos_menu = QMenu("Todos", self)
+        self._act("todos_new", "New Todos…", self.todos_new)
+        self._act("todos_load", "Load Todos…", self.todos_load)
+        self._act("todos_save", "Save Todos", self.todos_save)
+        self._act("todos_save_as", "Save Todos As…", self.todos_save_as)
+        self._act("todos_show", "Show Todos", self.toggle_todos, "Ctrl+T", checkable=True)
+        todos_menu.addAction(self._actions["todos_new"])
+        todos_menu.addAction(self._actions["todos_load"])
+        todos_menu.addSeparator()
+        todos_menu.addAction(self._actions["todos_save"])
+        todos_menu.addAction(self._actions["todos_save_as"])
+        todos_menu.addSeparator()
+        todos_menu.addAction(self._actions["todos_show"])
+        mb.addMenu(todos_menu)
+
+        # ---- Help ----
+        help_menu = QMenu("Help", self)
+        self._act("about", "About", self._about)
+        help_menu.addAction(self._actions["about"])
+        mb.addMenu(help_menu)
+
+    # --- workspace lifecycle ---------------------------------------------------
+    def current_workspace(self) -> Workspace | None:
+        if 0 <= self._current_index < len(self._workspaces):
+            return self._workspaces[self._current_index]
+        return None
+
+    def _current_ws_id(self) -> str | None:
+        if 0 <= self._current_index < len(self._workspaces):
+            return self._workspaces[self._current_index].id
+        return None
+
+    def _index_of(self, ws_id: str) -> int:
+        for i, ws in enumerate(self._workspaces):
+            if ws.id == ws_id:
+                return i
+        return -1
+
+    def _rebuild_by_id(self) -> None:
+        self._by_id = {ws.id: ws for ws in self._workspaces}
+
+    def _category_names(self) -> list[str]:
+        return [e.ref for e in self._layout if e.kind == "category"]
+
+    def _load_workspaces(self) -> None:
+        data = self._store.load()
+        self._workspaces = data.workspaces
+        self._layout = data.layout
+        self._collapsed = set(data.collapsed)
+        self._rebuild_by_id()
+
+        # restore global view preferences BEFORE loading panes so new panes
+        # inherit them
+        self._actions["wrap"].setChecked(bool(data.settings["wrap"]))
+        self._view.set_wrap(bool(data.settings["wrap"]))
+        self._actions["whitespace"].setChecked(bool(data.settings["show_whitespace"]))
+        self._view.set_show_whitespace(bool(data.settings["show_whitespace"]))
+        self._view.set_zoom(int(data.settings["zoom"]))
+        self._actions["sidebar"].setChecked(bool(data.settings["sidebar"]))
+        self._view.tree.setVisible(bool(data.settings["sidebar"]))
+
+        # restore the selected workspace (fall back to the first in the layout)
+        index = self._index_of(data.active_workspace_id) if data.active_workspace_id else -1
+        if index < 0:
+            first_ws_id = next(
+                (e.ref for e in self._layout if e.kind == "workspace" and e.ref in self._by_id),
+                None,
+            )
+            index = self._index_of(first_ws_id) if first_ws_id else -1
+        self._current_index = index
+        if index >= 0:
+            self._view.load_workspace(self._workspaces[index])
+
+        # restore window size + main splitter ratio
+        self.resize(int(data.window["width"]), int(data.window["height"]))
+        sizes = data.window["main_split"]
+        if isinstance(sizes, list) and len(sizes) == 2:
+            self._split.setSizes([int(sizes[0]), int(sizes[1])])
+
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        self._ws_list.set_model(self._layout, self._by_id, self._collapsed, self._current_ws_id())
+
+    def activate_workspace(self, ws_id: str) -> None:
+        index = self._index_of(ws_id)
+        if index < 0 or index == self._current_index:
+            return
+        if self._current_index >= 0:
+            if not self._view.confirm_close_all():
+                return
+            self._view.capture_into(self._workspaces[self._current_index])
+        self._current_index = index
+        self._view.load_workspace(self._workspaces[index])
+        self._refresh_list()
+        self._schedule_save()
+
+    def new_workspace(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose main folder", os.getcwd())
+        if not folder:
+            return
+        self.new_workspace_from_folder(folder)
+
+    def new_workspace_from_folder(self, folder: str) -> None:
+        folder = os.path.abspath(folder)
+        if self._current_index >= 0:
+            if not self._view.confirm_close_all():
+                return
+            self._view.capture_into(self._workspaces[self._current_index])
+        ws = Workspace(id=uuid.uuid4().hex, name=None, root=folder, tabs=[], active=0)
+        self._workspaces.append(ws)
+        self._layout.append(LayoutEntry("workspace", ws.id))
+        self._rebuild_by_id()
+        self._current_index = len(self._workspaces) - 1
+        self._view.load_workspace(ws)
+        self._refresh_list()
+        self._schedule_save()
+
+    def close_workspace(self, ws_id: str) -> None:
+        index = self._index_of(ws_id)
+        if index < 0:
+            return
+        current_id = self._current_ws_id()
+        closing_current = index == self._current_index
+        if closing_current and not self._view.confirm_close_all():
+            return
+        self._workspaces.pop(index)
+        self._layout = [e for e in self._layout if not (e.kind == "workspace" and e.ref == ws_id)]
+        self._rebuild_by_id()
+        if self._workspaces:
+            if closing_current:
+                self._current_index = min(index, len(self._workspaces) - 1)
+                self._view.load_workspace(self._workspaces[self._current_index])
+            else:
+                self._current_index = self._index_of(current_id)
+        else:
+            self._current_index = -1
+            self._view.close_all_tabs()
+            self._view.workspace = None
+        self._refresh_list()
+        self._schedule_save()
+
+    def close_current_workspace(self) -> None:
+        ws_id = self._current_ws_id()
+        if ws_id is not None:
+            self.close_workspace(ws_id)
+
+    def rename_workspace(self, ws_id: str) -> None:
+        index = self._index_of(ws_id)
+        if index < 0:
+            return
+        ws = self._workspaces[index]
+        current = ws.name or ""
+        name, ok = QInputDialog.getText(self, "Rename Workspace", "Workspace name:", text=current)
+        if not ok:
+            return
+        name = name.strip()
+        ws.name = name if name else None
+        self._refresh_list()
+        self._schedule_save()
+
+    # --- categories ------------------------------------------------------------
+    def new_category(self) -> None:
+        name, ok = QInputDialog.getText(self, "New Category", "Category name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name or name in self._category_names():
+            return
+        self._layout.append(LayoutEntry("category", name))
+        self._refresh_list()
+        self._schedule_save()
+
+    def rename_category(self, old: str) -> None:
+        names = self._category_names()
+        if old not in names:
+            return
+        new, ok = QInputDialog.getText(self, "Rename Category", "Category name:", text=old)
+        if not ok:
+            return
+        new = new.strip()
+        if not new or (new in names and new != old):
+            return
+        for entry in self._layout:
+            if entry.kind == "category" and entry.ref == old:
+                entry.ref = new
+        if old in self._collapsed:
+            self._collapsed.discard(old)
+            self._collapsed.add(new)
+        self._refresh_list()
+        self._schedule_save()
+
+    def _category_members(self, name: str) -> list[str]:
+        ids: list[str] = []
+        inside = False
+        for entry in self._layout:
+            if entry.kind == "category":
+                inside = entry.ref == name
+                continue
+            if inside and entry.kind == "workspace":
+                ids.append(entry.ref)
+        return ids
+
+    def delete_category(self, name: str) -> None:
+        if name not in self._category_names():
+            return
+        member_ids = set(self._category_members(name))
+        ret = QMessageBox.question(
+            self,
+            "Delete category",
+            f"Deleting '{name}' will CLOSE {len(member_ids)} workspace(s).\n"
+            "Files are NOT deleted. Continue?",
+        )
+        if ret != QMessageBox.Yes:
+            return
+        current_id = self._current_ws_id()
+        if current_id in member_ids and not self._view.confirm_close_all():
+            return
+        self._workspaces = [ws for ws in self._workspaces if ws.id not in member_ids]
+        self._layout = [
+            e for e in self._layout
+            if not (e.kind == "category" and e.ref == name)
+            and not (e.kind == "workspace" and e.ref in member_ids)
+        ]
+        self._collapsed.discard(name)
+        self._rebuild_by_id()
+        if current_id is not None and current_id in self._by_id:
+            self._current_index = self._index_of(current_id)
+        elif self._workspaces:
+            self._current_index = 0
+            self._view.load_workspace(self._workspaces[0])
+        else:
+            self._current_index = -1
+            self._view.close_all_tabs()
+            self._view.workspace = None
+        self._refresh_list()
+        self._schedule_save()
+
+    def move_workspace_up(self, ws_id: str) -> None:
+        self._move_workspace(ws_id, -1)
+
+    def move_workspace_down(self, ws_id: str) -> None:
+        self._move_workspace(ws_id, +1)
+
+    def _group_of(self, index: int) -> str | None:
+        for i in range(index - 1, -1, -1):
+            entry = self._layout[i]
+            if entry.kind == "category":
+                return entry.ref
+        return None
+
+    def _move_workspace(self, ws_id: str, step: int) -> None:
+        for i, entry in enumerate(self._layout):
+            if entry.kind == "workspace" and entry.ref == ws_id:
+                j = i + step
+                if (
+                    0 <= j < len(self._layout)
+                    and self._layout[j].kind == "workspace"
+                    and self._group_of(i) == self._group_of(j)
+                ):
+                    self._layout[i], self._layout[j] = self._layout[j], self._layout[i]
+                    self._refresh_list()
+                    self._schedule_save()
+                return
+
+    def move_workspace_to_category(self, ws_id: str) -> None:
+        if self._index_of(ws_id) < 0:
+            return
+        names = self._category_names()
+        choice, ok = QInputDialog.getItem(
+            self, "Move to Category", "Category:", names + ["Uncategorized"], 0, False
+        )
+        if not ok:
+            return
+        layout = [e for e in self._layout if not (e.kind == "workspace" and e.ref == ws_id)]
+        entry = LayoutEntry("workspace", ws_id)
+        if choice == "Uncategorized":
+            layout.insert(0, entry)
+        else:
+            for i, e in enumerate(layout):
+                if e.kind == "category" and e.ref == choice:
+                    # append at the end of the category's block
+                    k = i + 1
+                    while k < len(layout) and layout[k].kind == "workspace":
+                        k += 1
+                    layout.insert(k, entry)
+                    break
+        self._layout = layout
+        self._refresh_list()
+        self._schedule_save()
+
+    def move_category_up(self, name: str) -> None:
+        self._move_category(name, -1)
+
+    def move_category_down(self, name: str) -> None:
+        self._move_category(name, +1)
+
+    def _move_category(self, name: str, step: int) -> None:
+        idx = next(
+            (i for i, e in enumerate(self._layout) if e.kind == "category" and e.ref == name),
+            None,
+        )
+        if idx is None:
+            return
+        header = None
+        if step < 0:
+            for i in range(idx - 1, -1, -1):
+                if self._layout[i].kind == "category":
+                    header = i
+                    break
+        else:
+            for i in range(idx + 1, len(self._layout)):
+                if self._layout[i].kind == "category":
+                    header = i
+                    break
+        if header is None:
+            return
+        lo, hi = min(idx, header), max(idx, header)
+        end = len(self._layout)
+        for i in range(hi + 1, len(self._layout)):
+            if self._layout[i].kind == "category":
+                end = i
+                break
+        block_a = self._layout[lo:hi]
+        block_b = self._layout[hi:end]
+        self._layout = self._layout[:lo] + block_b + block_a + self._layout[end:]
+        self._refresh_list()
+        self._schedule_save()
+
+    def toggle_workspaces(self) -> None:
+        self._ws_list.setVisible(not self._ws_list.isVisible())
+
+    # --- todos -------------------------------------------------------------------
+    def _todos_panes(self) -> list:
+        return [p for p in self._view.panes() if isinstance(p, TodosPane)]
+
+    def _active_todos_pane(self):
+        pane = self._view.active_pane()
+        if isinstance(pane, TodosPane):
+            return pane
+        panes = self._todos_panes()
+        return panes[-1] if panes else None
+
+    def _focus_todos_tab(self) -> None:
+        panes = self._todos_panes()
+        if panes:
+            self._view.focus_pane(panes[0])
+        else:
+            if self.current_workspace() is None:
+                self.new_workspace_from_folder(os.getcwd())
+            self._view.new_todos_pane()
+
+    def toggle_todos(self, on: bool | None = None) -> None:
+        """Open (or focus) a Todos tab in the active workspace."""
+        self._focus_todos_tab()
+        self._actions["todos_show"].setChecked(True)
+
+    def todos_new(self) -> None:
+        """Create a fresh, untitled Todos tab in the active workspace."""
+        if self.current_workspace() is None:
+            self.new_workspace_from_folder(os.getcwd())
+        pane = self._view.new_todos_pane()
+        self._view.focus_pane(pane)
+
+    def todos_load(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Todos", os.getcwd(),
+            "Todos files (*.todo *.json);;All files (*)"
+        )
+        if not path:
+            return
+        if self.current_workspace() is None:
+            self.new_workspace_from_folder(os.path.dirname(path) or os.getcwd())
+        pane = self._view.new_todos_pane()
+        pane.load(path)
+        self._schedule_save()
+
+    def todos_save(self) -> None:
+        pane = self._active_todos_pane()
+        if pane is not None:
+            self._view.save_pane(pane)
+
+    def todos_save_as(self) -> None:
+        pane = self._active_todos_pane()
+        if pane is None:
+            return
+        start = pane.filepath or os.path.join(os.getcwd(), "todos.todo")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Todos As", start,
+            "Todos files (*.todo);;All files (*)"
+        )
+        if path and pane.saveAs(path):
+            self._schedule_save()
+
+    # --- open in explorer / terminal -------------------------------------------
+    def open_in_explorer(self, path: str) -> None:
+        if not path or not os.path.isdir(path):
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def open_terminal(self, path: str) -> None:
+        if not path or not os.path.isdir(path):
+            return
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "cmd.exe", "/k", "cd", "/d", path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-a", "Terminal", path],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+        except Exception:
+            return
+        candidates = [
+            ["gnome-terminal", "--working-directory", path],
+            ["konsole", "--working-directory", path],
+            ["xfce4-terminal", "--working-directory", path],
+            ["x-terminal-emulator", "--working-directory", path],
+            ["xterm", "-e", "sh", "-c", "cd %s && exec sh" % shlex.quote(path)],
+        ]
+        for cmd in candidates:
+            if shutil.which(cmd[0]):
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                return
+
+    # --- file actions ----------------------------------------------------------
+    def open_paths(self, paths: list[str]) -> None:
+        for raw in paths:
+            path = os.path.abspath(os.path.expanduser(raw))
+            if not os.path.exists(path):
+                continue
+            if os.path.isdir(path):
+                target = next((ws for ws in self._workspaces if ws.root == path), None)
+                if target is not None:
+                    self.activate_workspace(target.id)
+                else:
+                    self.new_workspace_from_folder(path)
+            else:
+                if self._current_index < 0:
+                    self.new_workspace_from_folder(os.path.dirname(path))
+                self._view.open_file(path)
+        self._schedule_save()
+
+    def new_file(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.new_untitled()
+        self._schedule_save()
+
+    def open_file_dialog(self) -> None:
+        if self.current_workspace() is None:
+            return
+        start = self._view.current_root() or os.getcwd()
+        path, _ = QFileDialog.getOpenFileName(self, "Open file", start, "All files (*)")
+        if path:
+            self._view.open_file(path)
+            self._schedule_save()
+
+    def close_tab(self) -> None:
+        if self.current_workspace() is None:
+            return
+        if self._view.tab_count():
+            self._view.close_active_tab()
+            self._schedule_save()
+
+    def save(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.save_active()
+        self._schedule_save()
+
+    def save_all(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.save_all()
+        self._schedule_save()
+
+    # --- editor actions (delegate to active pane) ------------------------------
+    def _active_pane(self):
+        if self.current_workspace() is None:
+            return None
+        pane = self._view.active_pane()
+        return pane if isinstance(pane, EditorPane) else None
+
+    def _delegate(self, method: str) -> None:
+        pane = self._active_pane()
+        if pane is not None:
+            getattr(pane, method)()
+
+    def undo(self): self._delegate("undo")
+    def redo(self): self._delegate("redo")
+    def cut(self): self._delegate("cut")
+    def copy(self): self._delegate("copy")
+    def paste(self): self._delegate("paste")
+    def select_all(self): self._delegate("selectAll")
+
+    def show_find(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.show_find_bar()
+
+    # --- view actions ----------------------------------------------------------
+    def toggle_wrap(self, on: bool) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.set_wrap(on)
+        self._schedule_save()
+
+    def toggle_whitespace(self, on: bool) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.set_show_whitespace(on)
+        self._schedule_save()
+
+    def zoom_in(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.zoom_in()
+        self._schedule_save()
+
+    def zoom_out(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.zoom_out()
+        self._schedule_save()
+
+    def zoom_reset(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.zoom_reset()
+        self._schedule_save()
+
+    def toggle_sidebar(self, checked: bool) -> None:
+        self._view.tree.setVisible(checked)
+        self._schedule_save()
+
+    # --- persistence -----------------------------------------------------------
+    def _schedule_save(self) -> None:
+        self._save_timer.start()
+
+    def _current_settings(self) -> dict:
+        return {
+            "wrap": self._actions["wrap"].isChecked(),
+            "show_whitespace": self._actions["whitespace"].isChecked(),
+            "zoom": self._view.zoom_offset(),
+            "sidebar": self._view.tree.isVisible(),
+        }
+
+    def _current_window(self) -> dict:
+        sizes = self._split.sizes()
+        return {
+            "width": self.width(),
+            "height": self.height(),
+            "main_split": [int(s) for s in sizes] if len(sizes) == 2 else [200, 900],
+        }
+
+    def _save_state(self) -> None:
+        # capture the live view into the current workspace so its tabs/active
+        # tab are persisted even without switching away first
+        if self._current_index >= 0:
+            self._view.capture_into(self._workspaces[self._current_index])
+        collapsed = sorted(self._ws_list.collapsed_categories())
+        self._store.save(StoreData(
+            workspaces=self._workspaces,
+            layout=self._layout,
+            collapsed=collapsed,
+            active_workspace_id=self._current_ws_id(),
+            settings=self._current_settings(),
+            window=self._current_window(),
+        ))
+
+    def _about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About",
+            f"<b>{APP_DISPLAY_NAME}</b> {__version__}<br/>"
+            "A Sublime-like text editor built with Python and PySide6.",
+        )
+
+    # --- close -----------------------------------------------------------------
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._current_index >= 0:
+            if not self._view.confirm_close_all():
+                event.ignore()
+                return
+        self._save_state()
+        event.accept()

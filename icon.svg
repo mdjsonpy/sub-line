@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3f52"/>
+      <stop offset="1" stop-color="#23262f"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7f9fc"/>
+      <stop offset="1" stop-color="#dde3ee"/>
+    </linearGradient>
+  </defs>
+  <!-- rounded app tile -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <!-- page with folded corner -->
+  <path d="M38 26 h36 l16 16 v60 a6 6 0 0 1 -6 6 H38 a6 6 0 0 1 -6 -6 V32 a6 6 0 0 1 6 -6 z"
+        fill="url(#paper)"/>
+  <path d="M74 26 l16 16 H78 a4 4 0 0 1 -4 -4 z" fill="#b9c2d4"/>
+  <!-- text lines -->
+  <rect x="42" y="52" width="44" height="6" rx="3" fill="#5b8def"/>
+  <rect x="42" y="66" width="34" height="6" rx="3" fill="#8fa3c8"/>
+  <rect x="42" y="80" width="40" height="6" rx="3" fill="#8fa3c8"/>
+  <!-- caret -->
+  <rect x="86" y="78" width="3" height="10" fill="#3a3f52"/>
+</svg>
