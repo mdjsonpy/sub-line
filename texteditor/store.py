@@ -9,6 +9,11 @@ view preferences (``settings``), and the window size + main splitter ratio
 (``window``). ``load`` returns a ``StoreData`` bundle; ``save`` accepts one.
 ``version:1`` (workspaces only) and ``version:2`` (layout + collapsed) files are
 migrated to the ``version:3`` shape on load, filling in defaults.
+``version:4`` adds the per-workspace ``encrypted`` flag and the
+``vault_path`` field (both default to ``False``/``None`` when absent, as
+in v1-v3 files). For encrypted workspaces, ``vault_path`` holds the path to
+the persistent ``.vault`` file, and ``root`` holds the temp directory while
+the vault is unlocked (empty when locked).
 """
 from __future__ import annotations
 
@@ -26,6 +31,8 @@ class Workspace:
     active: int = 0
     splits: list = field(default_factory=list)  # list[list[str]] per split group
     split_actives: list = field(default_factory=list)  # active index per group
+    encrypted: bool = False  # True => contents live in a .vault file
+    vault_path: str | None = None  # persistent .vault file (authoritative when encrypted)
 
 
 @dataclass
@@ -87,6 +94,8 @@ def _parse_workspace(raw: dict) -> Workspace | None:
                 int(a) for a in actives_raw
                 if isinstance(a, (int, float))
             ],
+            encrypted=raw.get("encrypted") is True,
+            vault_path=raw.get("vault_path"),
         )
     except (TypeError, ValueError):
         return None
@@ -204,7 +213,7 @@ class WorkspacesStore:
     def save(self, data: StoreData) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         payload = {
-            "version": 3,
+            "version": 4,
             "workspaces": [asdict(ws) for ws in data.workspaces],
             "layout": [{"kind": e.kind, "ref": e.ref} for e in data.layout],
             "collapsed": list(data.collapsed),

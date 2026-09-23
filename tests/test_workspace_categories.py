@@ -60,7 +60,7 @@ class TestStoreV2:
         store.save(data)
 
         raw = json.load(open(path, encoding="utf-8"))
-        assert raw["version"] == 2
+        assert raw["version"] >= 4
         assert raw["layout"] == [
             {"kind": "workspace", "ref": "w1"},
             {"kind": "category", "ref": "Work"},
@@ -431,6 +431,51 @@ class TestDeleteCategory:
         try:
             mw.delete_category("DoesNotExist")
             assert [w.id for w in mw._workspaces] == ["a"]
+        finally:
+            mw.close()
+
+
+class TestEncryptedActivation:
+    def test_ensure_unlocked_already_unlocked_no_raise(self, tmp_path):
+        """Regression: ``_ensure_unlocked`` on an already-unlocked vault must
+        not raise and must point ``ws.root`` at the decrypted temp dir.
+
+        Previously it called ``VaultManager.temp_dir_for(ws_id)``, which does
+        not exist — the per-vault temp dir is exposed as ``Vault.temp_path``.
+        This is the exact line from the reported traceback.
+        """
+        import uuid
+        from texteditor import crypto
+        from texteditor.vault import VaultManager
+
+        # A real encrypted vault created from a folder with content.
+        folder = tmp_path / "src"
+        folder.mkdir()
+        (folder / "hello.py").write_text("print('hi')\n")
+        vault_file = crypto.create_encrypted_workspace(os.fspath(folder), "pw")
+        assert os.path.isfile(vault_file)
+        assert not (folder / "hello.py").exists()  # plaintext purged
+
+        ws_id = uuid.uuid4().hex
+        enc_ws = Workspace(
+            id=ws_id, name="Enc", root="", tabs=[], active=0,
+            encrypted=True, vault_path=vault_file,
+        )
+        mw = make_main_window(
+            tmp_path, [enc_ws], [LayoutEntry("workspace", ws_id)]
+        )
+        try:
+            # Isolated vault manager under tmp_path (don't pollute the real
+            # ~/.local/share/subline data dir).
+            mw._vaults = VaultManager(os.fspath(tmp_path) + os.sep + "vaults")
+            mw._vaults.get(ws_id, vault_file).unlock("pw")
+            assert mw._vaults.get(ws_id, vault_file).is_unlocked
+
+            # The exact line that raised before the fix:
+            ok = mw._ensure_unlocked(enc_ws)
+            assert ok is True
+            assert enc_ws.root and os.path.isdir(enc_ws.root)
+            assert os.path.isfile(os.path.join(enc_ws.root, "hello.py"))
         finally:
             mw.close()
 

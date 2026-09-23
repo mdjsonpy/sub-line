@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QApplication,
 )
-from PySide6.QtGui import QCursor, QFont
+from PySide6.QtGui import QCursor, QFont, QColor
 from PySide6.QtCore import Qt, Signal
 
 from .store import LayoutEntry
@@ -27,6 +27,7 @@ ROLE_KIND = Qt.UserRole        # "category" | "workspace"
 ROLE_REF = Qt.UserRole + 1     # category name, OR workspace id
 ROLE_LABEL = Qt.UserRole + 2   # base label (workspaces)
 ROLE_ROOT = Qt.UserRole + 3    # workspace root path
+ROLE_ENCRYPTED = Qt.UserRole + 4  # bool: workspace is an encrypted vault
 
 
 class WorkspaceList(QWidget):
@@ -44,6 +45,9 @@ class WorkspaceList(QWidget):
     deleteCategoryRequested = Signal(str)   # category name
     categoryUpRequested = Signal(str)       # category name
     categoryDownRequested = Signal(str)     # category name
+    unlockRequested = Signal(str)           # workspace id (encrypted)
+    lockRequested = Signal(str)             # workspace id (encrypted)
+    changePasswordRequested = Signal(str)   # workspace id (encrypted)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -91,13 +95,18 @@ class WorkspaceList(QWidget):
         item.setFont(0, self._bold_font())
         return item
 
-    def _make_workspace(self, parent, ws_id: str, label: str, root: str) -> QTreeWidgetItem:
+    def _make_workspace(self, parent, ws_id: str, label: str, root: str,
+                        encrypted: bool = False) -> QTreeWidgetItem:
         item = QTreeWidgetItem(parent, [label])
         item.setData(0, ROLE_KIND, "workspace")
         item.setData(0, ROLE_REF, ws_id)
         item.setData(0, ROLE_LABEL, label)
         item.setData(0, ROLE_ROOT, root or "")
+        item.setData(0, ROLE_ENCRYPTED, bool(encrypted))
         item.setFont(0, self._normal_font())
+        if encrypted:
+            item.setForeground(0, QColor("#e06060"))
+            item.setText(0, f"\U0001F512 {label}")
         if root:
             item.setToolTip(0, root)
         return item
@@ -118,7 +127,8 @@ class WorkspaceList(QWidget):
                     continue
                 label = ws.name or ws.root or "?"
                 parent = current_category if current_category is not None else self.tree
-                self._make_workspace(parent, entry.ref, label, ws.root or "")
+                self._make_workspace(parent, entry.ref, label, ws.root or "",
+                                     encrypted=bool(getattr(ws, "encrypted", False)))
         self.set_active(active_id)
 
     def set_active(self, active_id: str | None) -> None:
@@ -126,6 +136,8 @@ class WorkspaceList(QWidget):
             if item.data(0, ROLE_KIND) == "workspace":
                 ws_id = item.data(0, ROLE_REF)
                 base = item.data(0, ROLE_LABEL) or item.text(0)
+                if item.data(0, ROLE_ENCRYPTED):
+                    base = f"\U0001F512 {base}"
                 if ws_id == active_id:
                     item.setText(0, f"✓ {base}")
                     item.setFont(0, self._bold_font())
@@ -188,39 +200,77 @@ class WorkspaceList(QWidget):
         if chosen is act_new_cat:
             self.newCategoryRequested.emit()
 
-    def _workspace_menu(self, item: QTreeWidgetItem) -> None:
+    def _build_workspace_menu(self, item: QTreeWidgetItem):
+        """Build (but do not show) the workspace context menu.
+
+        Returns ``(menu, acts, ws_id, root)`` where ``acts`` maps a stable
+        action name (``rename``, ``unlock``, ``lock``, ``chpw``, ``copy``,
+        ``open``, ``terminal``, ``up``, ``down``, ``movecat``, ``close``) to
+        its ``QAction``. Encrypted workspaces expose the vault actions and
+        hide the file-path actions; plain workspaces do the reverse.
+        """
         ws_id = item.data(0, ROLE_REF)
         root = item.data(0, ROLE_ROOT) or ""
+        encrypted = bool(item.data(0, ROLE_ENCRYPTED))
         menu = QMenu(self)
-        act_rename = menu.addAction("Rename Workspace")
-        act_copy = act_open = act_terminal = None
-        if root:
+        acts: dict = {}
+        acts["rename"] = menu.addAction("Rename Workspace")
+        if encrypted:
             menu.addSeparator()
-            act_copy = menu.addAction("Copy Absolute Path")
-            act_open = menu.addAction("Open in File Explorer")
-            act_terminal = menu.addAction("Open Terminal Here")
+            acts["unlock"] = menu.addAction("Unlock…")
+            acts["lock"] = menu.addAction("Lock")
+            acts["chpw"] = menu.addAction("Change Password…")
+        elif root:
+            menu.addSeparator()
+            acts["copy"] = menu.addAction("Copy Absolute Path")
+            acts["open"] = menu.addAction("Open in File Explorer")
+            acts["terminal"] = menu.addAction("Open Terminal Here")
         menu.addSeparator()
-        act_up = menu.addAction("Move Up")
-        act_down = menu.addAction("Move Down")
-        act_movecat = menu.addAction("Move to Category…")
-        act_close = menu.addAction("Close Workspace")
-        chosen = menu.exec(QCursor.pos())
-        if chosen is act_rename:
+        acts["up"] = menu.addAction("Move Up")
+        acts["down"] = menu.addAction("Move Down")
+        acts["movecat"] = menu.addAction("Move to Category…")
+        acts["close"] = menu.addAction("Close Workspace")
+        return menu, acts, ws_id, root
+
+    def _dispatch_workspace(self, acts: dict, ws_id: str, root: str, chosen) -> None:
+        """Emit the signal for whichever action the user picked (or no-op if
+        ``chosen`` is ``None``)."""
+        if chosen is None:
+            return
+        key = None
+        for name, action in acts.items():
+            if action is chosen or action.text() == chosen.text():
+                key = name
+                break
+        if key is None:
+            return
+        if key == "rename":
             self.renameRequested.emit(ws_id)
-        elif chosen is act_copy:
+        elif key == "unlock":
+            self.unlockRequested.emit(ws_id)
+        elif key == "lock":
+            self.lockRequested.emit(ws_id)
+        elif key == "chpw":
+            self.changePasswordRequested.emit(ws_id)
+        elif key == "copy":
             self.copy_path_to_clipboard(root)
-        elif chosen is act_open:
+        elif key == "open":
             self.openFolderRequested.emit(root)
-        elif chosen is act_terminal:
+        elif key == "terminal":
             self.openTerminalRequested.emit(root)
-        elif chosen is act_up:
+        elif key == "up":
             self.moveUpRequested.emit(ws_id)
-        elif chosen is act_down:
+        elif key == "down":
             self.moveDownRequested.emit(ws_id)
-        elif chosen is act_movecat:
+        elif key == "movecat":
             self.moveToCategoryRequested.emit(ws_id)
-        elif chosen is act_close:
+        elif key == "close":
             self.closeRequested.emit(ws_id)
+
+    def _workspace_menu(self, item: QTreeWidgetItem) -> None:
+        menu, acts, ws_id, root = self._build_workspace_menu(item)
+        chosen = menu.exec(QCursor.pos())
+        self._dispatch_workspace(acts, ws_id, root, chosen)
 
     def _category_menu(self, item: QTreeWidgetItem) -> None:
         name = item.data(0, ROLE_REF)
