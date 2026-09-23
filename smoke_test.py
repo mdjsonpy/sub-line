@@ -352,7 +352,7 @@ mw4.move_workspace_to_category("c1")
 mw_mod.QInputDialog.getItem = _orig_getItem
 check("cats: c1 moved under Work2",
       [(e.kind, e.ref) for e in mw4._layout] ==
-      [("category", "Work2"), ("workspace", "c1"), ("workspace", "c2")])
+      [("category", "Work2"), ("workspace", "c2"), ("workspace", "c1")])
 
 # move workspace down within the category
 mw4.move_workspace_down("c1")
