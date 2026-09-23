@@ -117,3 +117,23 @@ class TestTodoRouting:
             assert "General" in panes[0].todos().categories()
         finally:
             mw.close()
+
+
+class TestRevealInExplorer:
+    def test_reveal_selected_emits_signal(self, tmp_path):
+        ft = make_tree()
+        f = os.fspath(tmp_path) + os.sep + "a.txt"
+        with open(f, "w") as fh:
+            fh.write("x")
+        emitted = []
+        ft.revealInExplorerRequested.connect(emitted.append)
+        assert ft.reveal_selected([f]) == [f]
+        assert emitted == [f]
+
+    def test_reveal_selected_ignores_missing(self, tmp_path):
+        ft = make_tree()
+        emitted = []
+        ft.revealInExplorerRequested.connect(emitted.append)
+        missing = os.fspath(tmp_path) + os.sep + "nope.txt"
+        assert ft.reveal_selected([missing]) == []
+        assert emitted == []

@@ -37,6 +37,7 @@ class FileTree(QWidget):
     fileActivated = Signal(str)
     toggleWorkspacesRequested = Signal()
     pathDeleted = Signal(str)
+    revealInExplorerRequested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -136,6 +137,8 @@ class FileTree(QWidget):
         act_todo = menu.addAction("New Todo…")
         act_copy = menu.addAction("Copy Absolute Path")
         act_copy.setEnabled(bool(sel))
+        act_reveal = menu.addAction("Show in File Explorer")
+        act_reveal.setEnabled(bool(sel))
         act_open = None
         if files:
             act_open = menu.addAction("Open")
@@ -165,6 +168,8 @@ class FileTree(QWidget):
         elif chosen is act_copy:
             if not self.copy_selected_paths(sel):
                 self.copy_path_to_clipboard(self._root_path or "")
+        elif chosen is act_reveal:
+            self.reveal_selected(sel)
         elif chosen is act_open:
             self.open_selected(sel)
         elif chosen is act_move:
@@ -261,6 +266,13 @@ class FileTree(QWidget):
         sel = [p for p in self._resolve_paths(paths) if os.path.isfile(p)]
         for p in sel:
             self.fileActivated.emit(p)
+        return sel
+
+    def reveal_selected(self, paths: list[str] | None = None) -> list[str]:
+        """Emit ``revealInExplorerRequested`` for each existing selected path."""
+        sel = [p for p in self._resolve_paths(paths) if os.path.exists(p)]
+        for p in sel:
+            self.revealInExplorerRequested.emit(p)
         return sel
 
     def move_selected_to(self, dest_dir: str, paths: list[str] | None = None) -> list[str]:

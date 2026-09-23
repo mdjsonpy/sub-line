@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         self._ws_list.lockRequested.connect(self._on_lock)
         self._ws_list.changePasswordRequested.connect(self._on_change_password)
         self._view.tree.toggleWorkspacesRequested.connect(self.toggle_workspaces)
+        self._view.tree.revealInExplorerRequested.connect(self.reveal_in_explorer)
         self._view.tabsChanged.connect(self._schedule_save)
 
         self._save_timer = QTimer(self)
@@ -711,6 +712,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def reveal_in_explorer(self, path: str) -> None:
+        """Reveal ``path`` in the OS file explorer, selecting it where supported.
+
+        Works for both files and folders (unlike ``open_in_explorer`` which is
+        folder-only). Falls back to opening the parent directory on platforms
+        whose file manager has no selection flag.
+        """
+        if not path or not os.path.exists(path):
+            return
+        path = os.path.abspath(path)
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path, "explore")  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                target = path if os.path.isdir(path) else os.path.dirname(path)
+                subprocess.Popen(["xdg-open", target],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
     def open_terminal(self, path: str) -> None:
         if not path or not os.path.isdir(path):
