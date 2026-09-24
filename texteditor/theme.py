@@ -23,6 +23,11 @@ MONO_FONT_FAMILY = "DejaVu Sans Mono"
 MONO_FONT_SIZE = 13
 MONO_FONT_WEIGHT = 400
 
+# Markdown table display colors.
+MD_TABLE_PIPE = "#8a8a8a"        # column borders (vertical bars)
+MD_TABLE_SEPARATOR = "#6a9955"   # the | --- | --- | alignment row
+MD_TABLE_HEADER = "#569cd6"      # first row (right above the separator)
+
 # Map Pygments token types -> hex color. Lookup walks .parent for fallbacks.
 PYGMENTS_COLORS: dict = {
     Token: "#d4d4d4",
@@ -85,6 +90,9 @@ class Theme:
     def __init__(self) -> None:
         self._editor_font = QFont(MONO_FONT_FAMILY, MONO_FONT_SIZE, MONO_FONT_WEIGHT)
         self._token_formats: dict = {}
+        self._md_pipe_format = None
+        self._md_separator_format = None
+        self._md_header_format = None
         self._build_token_formats()
 
     @property
@@ -98,6 +106,28 @@ class Theme:
             fmt = QTextCharFormat()
             fmt.setForeground(_hex_to_color(hexstr))
             self._token_formats[tok_type] = fmt
+
+        self._md_pipe_format = QTextCharFormat()
+        self._md_pipe_format.setForeground(_hex_to_color(MD_TABLE_PIPE))
+
+        self._md_separator_format = QTextCharFormat()
+        self._md_separator_format.setForeground(_hex_to_color(MD_TABLE_SEPARATOR))
+
+        self._md_header_format = QTextCharFormat()
+        self._md_header_format.setForeground(_hex_to_color(MD_TABLE_HEADER))
+        self._md_header_format.setFontWeight(QFont.Bold)
+
+    @property
+    def md_pipe_format(self):
+        return self._md_pipe_format
+
+    @property
+    def md_separator_format(self):
+        return self._md_separator_format
+
+    @property
+    def md_header_format(self):
+        return self._md_header_format
 
     def format_for_token(self, tok_type):
         """Return a QTextCharFormat for a token type, walking .parent for fallbacks."""

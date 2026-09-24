@@ -16,6 +16,8 @@ from PySide6.QtGui import (
 import chardet
 
 from .highlighter import PygmentsHighlighter, lexer_for_path
+from . import markdown_tables as md_tables
+from .md_table_highlighter import MarkdownTableHighlighter
 from .theme import Theme, EDITOR_BG
 
 TAB_SIZE = 4
@@ -45,6 +47,8 @@ class EditorPane(QPlainTextEdit):
         self.filepath: str | None = None
         self.encoding: str | None = "utf-8"
         self._highlighter: PygmentsHighlighter | None = None
+        self._md_table_highlighter: MarkdownTableHighlighter | None = None
+        self.is_markdown = False
         self._show_whitespace = False
         self._zoom = 0  # offset from base size
         self._base_size = theme.editor_font.pointSize()
@@ -208,10 +212,17 @@ class EditorPane(QPlainTextEdit):
     # --- tab / indent ----------------------------------------------------------
     def keyPressEvent(self, event) -> None:  # noqa: N802
         k = event.key()
+        mods = event.modifiers()
+        plain = not mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
         if k in (Qt.Key_Tab, Qt.Key_Backtab):
-            # plain Tab / Shift+Tab only; let Ctrl+Tab (tab switching) pass through
-            if not event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
-                self._handle_tab(k == Qt.Key_Backtab or bool(event.modifiers() & Qt.ShiftModifier))
+            if plain:
+                back = k == Qt.Key_Backtab or bool(mods & Qt.ShiftModifier)
+                if self.is_markdown and self._handle_table_tab(back):
+                    return
+                self._handle_tab(back)
+                return
+        elif k in (Qt.Key_Return, Qt.Key_Enter):
+            if plain and self.is_markdown and self._handle_table_enter():
                 return
         super().keyPressEvent(event)
 
@@ -259,6 +270,143 @@ class EditorPane(QPlainTextEdit):
             c.removeSelectedText()
             self.setTextCursor(c)
 
+    # --- markdown table editing -------------------------------------------------
+    @staticmethod
+    def _current_cell(spans: list[tuple[int, int]], col: int) -> int | None:
+        for i, (s, e) in enumerate(spans):
+            if s <= col <= e:
+                return i
+        return None
+
+    def _set_cursor_to_cell(self, block, content_start: int) -> None:
+        c = self.textCursor()
+        c.setPosition(block.position() + content_start)
+        self.setTextCursor(c)
+
+    def _handle_table_tab(self, back: bool) -> bool:
+        cursor = self.textCursor()
+        block = cursor.block()
+        spans = md_tables.cell_spans(block.text())
+        if not spans:
+            return False
+        col = cursor.position() - block.position()
+        idx = self._current_cell(spans, col)
+        if idx is None:
+            if not back:
+                right = next((i for i, (s, _e) in enumerate(spans) if s > col), None)
+                idx = (right - 1) if right is not None else (len(spans) - 1)
+            else:
+                left = next((i for i, (_s, e) in enumerate(spans) if e < col), None)
+                idx = (left + 1) if left is not None else 0
+        if not back:
+            target = idx + 1
+            if target >= len(spans):
+                nb = block.next()
+                nspans = md_tables.cell_spans(nb.text()) if nb.isValid() else []
+                if nspans:
+                    self._set_cursor_to_cell(nb, nspans[0][0])
+                    return True
+                target = 0
+            self._set_cursor_to_cell(block, spans[target][0])
+            return True
+        target = idx - 1
+        if target < 0:
+            pb = block.previous()
+            pspans = md_tables.cell_spans(pb.text()) if pb.isValid() else []
+            if pspans:
+                self._set_cursor_to_cell(pb, pspans[-1][0])
+                return True
+            target = len(spans) - 1
+        self._set_cursor_to_cell(block, spans[target][0])
+        return True
+
+    def _handle_table_enter(self) -> bool:
+        cursor = self.textCursor()
+        block = cursor.block()
+        line = block.text()
+        spans = md_tables.cell_spans(line)
+        if not spans:
+            return False
+        doc = self.document()
+        lines = doc.toPlainText().split("\n")
+        bn = block.blockNumber()
+        block_range = next(
+            ((s, e) for s, e in md_tables.find_table_blocks(lines) if s <= bn <= e),
+            None,
+        )
+        if block_range is None:
+            return False
+        s, e = block_range
+        idx = self._current_cell(spans, cursor.position() - block.position())
+        idx = len(spans) - 1 if idx is None else idx
+        if bn == e and idx == len(spans) - 1:
+            return False  # last cell of last row -> exit the table
+        ncols = len(spans)
+        new_row = "| " + " | ".join([""] * ncols) + " |"
+        end_pos = block.position() + len(line)
+        c = QTextCursor(doc)
+        c.setPosition(end_pos)
+        c.insertText("\n" + new_row)
+        target_cell = min(idx, ncols - 1)
+        new_block_index = bn + 1
+        self._align_block_range(s, e + 1)
+        nb = doc.findBlockByNumber(new_block_index)
+        nspans = md_tables.cell_spans(nb.text()) if nb.isValid() else []
+        if nspans and target_cell < len(nspans):
+            self._set_cursor_to_cell(nb, nspans[target_cell][0])
+        return True
+
+    def _align_block_range(self, s: int, e: int) -> bool:
+        doc = self.document()
+        lines = doc.toPlainText().split("\n")
+        if s < 0 or s > e or e >= len(lines):
+            return False
+        new_rows = md_tables.align_block(lines, s, e)
+        if new_rows == lines[s:e + 1]:
+            return False
+        start_block = doc.findBlockByNumber(s)
+        end_block = doc.findBlockByNumber(e)
+        c = QTextCursor(doc)
+        c.setPosition(start_block.position())
+        c.setPosition(end_block.position() + len(end_block.text()), QTextCursor.KeepAnchor)
+        c.insertText("\n".join(new_rows))
+        return True
+
+    def format_table(self) -> bool:
+        """Align the table block containing the cursor. Returns True if changed."""
+        if not self.is_markdown:
+            return False
+        doc = self.document()
+        lines = doc.toPlainText().split("\n")
+        bn = self.textCursor().blockNumber()
+        target = next(
+            ((s, e) for s, e in md_tables.find_table_blocks(lines) if s <= bn <= e), None
+        )
+        if target is None:
+            return False
+        return self._align_block_range(*target)
+
+    def format_all_tables(self) -> bool:
+        """Align every table in the document. Returns True if anything changed."""
+        if not self.is_markdown:
+            return False
+        doc = self.document()
+        lines = doc.toPlainText().split("\n")
+        new_lines, changed = md_tables.align_all(lines)
+        if not changed:
+            return False
+        pos = self.textCursor().position()
+        c = QTextCursor(doc)
+        c.select(QTextCursor.Document)
+        c.insertText("\n".join(new_lines))
+        try:
+            c = QTextCursor(doc)
+            c.setPosition(min(pos, doc.characterCount() - 1))
+            self.setTextCursor(c)
+        except RuntimeError:
+            self.moveCursor(QTextCursor.Start)
+        return True
+
     # --- internal --------------------------------------------------------------
     def _on_modification_changed(self, modified: bool) -> None:
         if self._loading:
@@ -269,6 +417,18 @@ class EditorPane(QPlainTextEdit):
         lexer = lexer_for_path(path, text[:4096])
         self._highlighter = PygmentsHighlighter(lexer, self._theme, self.document())
         self._highlighter.rehighlight()
+
+        self.is_markdown = md_tables.is_markdown_path(path) or (
+            (getattr(lexer, "name", "") or "").lower() == "markdown"
+        )
+        if self.is_markdown:
+            if self._md_table_highlighter is None:
+                self._md_table_highlighter = MarkdownTableHighlighter(
+                    self._theme, self.document()
+                )
+            self._md_table_highlighter.rehighlight()
+        else:
+            self._md_table_highlighter = None
 
     # --- line number area ------------------------------------------------------
     def line_number_area_width(self) -> int:
