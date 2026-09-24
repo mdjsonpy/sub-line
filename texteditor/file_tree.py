@@ -38,6 +38,7 @@ class FileTree(QWidget):
     toggleWorkspacesRequested = Signal()
     pathDeleted = Signal(str)
     revealInExplorerRequested = Signal(str)
+    openInGroupRequested = Signal(str, str)   # (path, "left"|"right")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -140,8 +141,13 @@ class FileTree(QWidget):
         act_reveal = menu.addAction("Show in File Explorer")
         act_reveal.setEnabled(bool(sel))
         act_open = None
+        act_open_left = None
+        act_open_right = None
         if files:
             act_open = menu.addAction("Open")
+            menu.addSeparator()
+            act_open_left = menu.addAction("Open in the Left")
+            act_open_right = menu.addAction("Open at the Right")
         act_move = None
         if files:
             menu.addSeparator()
@@ -172,6 +178,12 @@ class FileTree(QWidget):
             self.reveal_selected(sel)
         elif chosen is act_open:
             self.open_selected(sel)
+        elif chosen is act_open_left:
+            for p in files:
+                self.openInGroupRequested.emit(p, "left")
+        elif chosen is act_open_right:
+            for p in files:
+                self.openInGroupRequested.emit(p, "right")
         elif chosen is act_move:
             dest = QFileDialog.getExistingDirectory(self, "Move to folder", os.path.dirname(files[0]))
             if dest:

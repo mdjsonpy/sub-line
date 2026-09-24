@@ -25,7 +25,7 @@ from .file_tree import FileTree
 from .find_bar import FindBar
 from .editor_view import EditorPane
 from .binary_stub import BinaryPane
-from .image_view import ImagePane
+from .image_view import ImagePane, image_neighbor
 from .todos_pane import TodosPane
 from .binary import classify_file, KIND_TEXT, KIND_IMAGE
 from .store import Workspace
@@ -78,6 +78,7 @@ class WorkspaceView(QWidget):
         self.tree = FileTree(self)
         self.tree.fileActivated.connect(self.open_file)
         self.tree.pathDeleted.connect(self._on_path_deleted)
+        self.tree.openInGroupRequested.connect(self.open_in_side)
 
         # Right side: find bar (hidden) above the tab widget
         right = QWidget(self)
@@ -184,12 +185,23 @@ class WorkspaceView(QWidget):
             return
         i = self._groups.index(group)
         self._groups.pop(i)
-        self._panes_splitter.removeWidget(group)
+        group.setParent(None)        # removes the group from the QSplitter
         group.deleteLater()
         if self._active_group is group:
             self._active_group = self._groups[-1]
             self._on_group_current_changed(self._active_group)
         self.tabsChanged.emit()
+
+    def left_group(self) -> QTabWidget:
+        return self._groups[0]
+
+    def right_group(self) -> QTabWidget:
+        return self._groups[-1]
+
+    def _ensure_right_group(self) -> QTabWidget:
+        if len(self._groups) >= 2:
+            return self._groups[-1]
+        return self._add_group_after(self._groups[0])   # creates the one split
 
     def _on_group_current_changed(self, group: QTabWidget) -> None:
         self._active_group = group
@@ -205,6 +217,9 @@ class WorkspaceView(QWidget):
             pane.setWrap(self._wrap)
             pane.setShowWhitespace(self._show_ws)
             pane.set_zoom(self._zoom)
+        if isinstance(pane, ImagePane):
+            pane.navigateRequested.connect(lambda step, p=pane: self._navigate_image(p, step))
+            pane.pathChanged.connect(lambda p=pane: self._update_pane_title(p))
         group.addTab(pane, pane.title)
         group.setCurrentWidget(pane)
         self._on_pane_modified(pane, pane.isModified())
@@ -326,7 +341,10 @@ class WorkspaceView(QWidget):
     # --- tab context menu ------------------------------------------------------
     def show_tab_context_menu(self, group: QTabWidget, index: int) -> None:
         menu = QMenu(self)
-        act_split = menu.addAction("Split to the Right")
+        act_move_left = menu.addAction("Move Tab to the Left")
+        act_move_right = menu.addAction("Move Tab to the Right")
+        act_end = menu.addAction("End Split View")
+        menu.addSeparator()
         act_close = menu.addAction("Close Tab")
         menu.addSeparator()
         act_right = menu.addAction("Close to the Right")
@@ -336,9 +354,20 @@ class WorkspaceView(QWidget):
         act_right.setEnabled(index + 1 < count)
         act_left.setEnabled(index > 0)
         act_others.setEnabled(count > 1)
+
+        split = len(self._groups) >= 2
+        left, right = self._groups[0], self._groups[-1]
+        act_move_left.setEnabled(split and group is right)
+        act_move_right.setEnabled((not split) or (split and group is left))
+        act_end.setEnabled(split)
+
         chosen = menu.exec(QCursor.pos())
-        if chosen is act_split:
-            self.split_tab_at(group, index)
+        if chosen is act_move_left:
+            self.move_tab(group, index, "left")
+        elif chosen is act_move_right:
+            self.move_tab(group, index, "right")
+        elif chosen is act_end:
+            self.end_split()
         elif chosen is act_close:
             self.request_close_tab(index, group)
         elif chosen is act_right:
@@ -348,43 +377,78 @@ class WorkspaceView(QWidget):
         elif chosen is act_others:
             self.close_others(group, index)
 
-    # --- split to the right ----------------------------------------------------
-    def split_to_right(self, group: QTabWidget | None = None) -> QTabWidget | None:
-        """Duplicate the active pane of ``group`` into a new group on its right."""
-        group = group or self.active_group()
-        if not group.count():
-            return None
-        return self.split_tab_at(group, group.currentIndex())
+    # --- move tabs between panes (relocate, no clone) --------------------------
+    def _move_pane(self, pane, target_group) -> None:
+        src = self._group_of(pane)
+        if src is None or src is target_group:
+            return
+        idx = src.indexOf(pane)
+        if idx < 0:
+            return
+        src.removeTab(idx)                 # detach tab; widget stays alive
+        target_group.addTab(pane, pane.title)   # re-parent + attach (append)
+        target_group.setCurrentWidget(pane)
+        self._on_pane_modified(pane, pane.isModified())  # refresh tab text
+        self.tabsChanged.emit()
+        if src.count() == 0 and len(self._groups) > 1:
+            self._remove_group(src)        # auto-collapse an emptied pane
 
-    def split_tab_at(self, group: QTabWidget, index: int) -> QTabWidget | None:
+    def move_tab(self, group, index, side) -> None:
         pane = group.widget(index)
         if pane is None:
-            return None
-        new_group = self._add_group_after(group)
-        clone = self._clone_pane(pane)
-        if clone is not None:
-            self._add_pane_to(new_group, clone)
+            return
+        if side == "left":
+            target = self._groups[0]
         else:
-            self._remove_group(new_group)
-        return new_group
+            target = self._ensure_right_group()
+        if target is group:
+            return
+        self._move_pane(pane, target)
 
-    def _clone_pane(self, pane):
-        if isinstance(pane, EditorPane):
-            clone = EditorPane(self._theme)
-            if pane.filepath:
-                clone.loadFile(pane.filepath)
-            else:
-                clone.setPlainText(pane.toPlainText())
-                clone.document().setModified(False)
-            return clone
-        if isinstance(pane, ImagePane):
-            return ImagePane(pane.filepath)
-        if isinstance(pane, TodosPane):
-            clone = TodosPane()
-            clone.set_todos(pane.clone_model())
-            clone.set_modified(pane.isModified())
-            return clone
-        return BinaryPane(pane.filepath, getattr(pane, "kind", "binary"))
+    def open_in_side(self, path: str, side: str) -> None:
+        path = os.path.abspath(path)
+        existing = self.pane_for_path(path)
+        if existing is not None:
+            g = self._group_of(existing)
+            if g is not None:
+                g.setCurrentWidget(existing)
+            return
+        target = self._groups[0] if side == "left" else self._ensure_right_group()
+        pane = self._make_pane_for(path)
+        self._add_pane_to(target, pane)
+        self.tree.selectPath(path)
+
+    def end_split(self) -> None:
+        if len(self._groups) <= 1:
+            return
+        left = self._groups[0]
+        right = self._groups[-1]
+        while right.count():
+            pane = right.widget(0)
+            right.removeTab(0)             # detach (widget survives)
+            left.addTab(pane, pane.title)  # re-parent into left
+        cur = left.currentWidget()
+        if cur is not None:
+            left.setCurrentWidget(cur)
+        self._remove_group(right)
+        self.tabsChanged.emit()
+
+    # --- image navigation ------------------------------------------------------
+    def _navigate_image(self, pane, step) -> None:
+        if not getattr(pane, "filepath", None):
+            return
+        neighbor = image_neighbor(pane.filepath, step)
+        if neighbor:
+            pane.set_path(neighbor)
+
+    def _update_pane_title(self, pane) -> None:
+        group = self._group_of(pane)
+        if group is None:
+            return
+        i = group.indexOf(pane)
+        if i < 0:
+            return
+        group.setTabText(i, pane.title + (" ●" if pane.isModified() else ""))
 
     def _close_indices(self, group: QTabWidget, indices: list[int]) -> bool:
         """Confirm every modified tab, then remove them. False if cancelled."""
@@ -505,6 +569,11 @@ class WorkspaceView(QWidget):
         splits = ws.splits or [list(ws.tabs)]
         if not splits:
             splits = [[]]
+        if len(splits) > 2:
+            right = splits[1]
+            for extra in splits[2:]:
+                right = right + extra
+            splits = [splits[0], right]
         actives = ws.split_actives or []
         for si, tablist in enumerate(splits):
             group = self._groups[si] if si < len(self._groups) else self._add_group_at_end()

@@ -145,6 +145,16 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._actions["find"])
         mb.addMenu(edit_menu)
 
+        # ---- Markdown ----
+        md_menu = QMenu("Markdown", self)
+        self._act("format_table", "Format Table", self.format_table, "Ctrl+Shift+T")
+        self._actions["format_table"].setToolTip("Align the table under the cursor into a clean grid")
+        self._act("format_all_tables", "Format All Tables", self.format_all_tables, "Ctrl+Shift+A")
+        self._actions["format_all_tables"].setToolTip("Align every table in the document")
+        md_menu.addAction(self._actions["format_table"])
+        md_menu.addAction(self._actions["format_all_tables"])
+        mb.addMenu(md_menu)
+
         # ---- View ----
         view_menu = QMenu("View", self)
         self._act("wrap", "Toggle Word Wrap", self.toggle_wrap, "Ctrl+Shift+V", checkable=True)
@@ -155,6 +165,7 @@ class MainWindow(QMainWindow):
         self._act("zoom_reset", "Reset Zoom", self.zoom_reset, "Ctrl+0")
         self._act("next_tab", "Next Tab", self.next_tab, "Ctrl+Tab")
         self._act("prev_tab", "Previous Tab", self.previous_tab, "Ctrl+Shift+Tab")
+        self._act("end_split", "End Split View", self.end_split)
         self._act("sidebar", "Toggle Sidebar", self.toggle_sidebar, "Ctrl+B", checkable=True)
         self._actions["sidebar"].setChecked(True)
         view_menu.addAction(self._actions["wrap"])
@@ -166,6 +177,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self._actions["next_tab"])
         view_menu.addAction(self._actions["prev_tab"])
+        view_menu.addAction(self._actions["end_split"])
         view_menu.addSeparator()
         view_menu.addAction(self._actions["sidebar"])
         mb.addMenu(view_menu)
@@ -815,6 +827,12 @@ class MainWindow(QMainWindow):
             return
         self._view.cycle_tab(-1)
 
+    def end_split(self) -> None:
+        if self.current_workspace() is None:
+            return
+        self._view.end_split()
+        self._schedule_save()
+
     def save(self) -> None:
         if self.current_workspace() is None:
             return
@@ -845,6 +863,8 @@ class MainWindow(QMainWindow):
     def copy(self): self._delegate("copy")
     def paste(self): self._delegate("paste")
     def select_all(self): self._delegate("selectAll")
+    def format_table(self): self._delegate("format_table")
+    def format_all_tables(self): self._delegate("format_all_tables")
 
     def show_find(self) -> None:
         if self.current_workspace() is None:

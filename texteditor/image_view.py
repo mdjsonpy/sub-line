@@ -14,10 +14,10 @@ import os
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, QEvent
 from PySide6.QtGui import QPixmap, QMovie, QPainter, QColor, QFont, QPen, QBrush
 
-from .binary import KIND_IMAGE
+from .binary import KIND_IMAGE, is_image
 from .theme import EDITOR_BG
 
 MAX_SIDE = 16384      # bound the source pixmap to avoid OOM on huge images
@@ -255,6 +255,8 @@ class ImagePane(QWidget):
     """Read-only image preview pane (one tab's content)."""
 
     modificationChanged = Signal(bool)
+    pathChanged = Signal()          # emitted when filepath changes (navigation)
+    navigateRequested = Signal(int) # Left = -1, Right = +1
 
     def __init__(self, path: str, parent=None) -> None:
         super().__init__(parent)
@@ -274,6 +276,11 @@ class ImagePane(QWidget):
         self.scroll.setFrameShape(QScrollArea.NoFrame)
         self.scroll.setWidget(self.canvas)
         layout.addWidget(self.scroll)
+
+        # arrow-key navigation works regardless of which child holds focus
+        self.canvas.installEventFilter(self)
+        self.scroll.installEventFilter(self)
+        self.scroll.viewport().installEventFilter(self)
 
     def _apply_scale(self, new_scale: float) -> None:
         self.canvas.setScale(new_scale)
@@ -308,3 +315,48 @@ class ImagePane(QWidget):
 
     def resetZoom(self) -> None:  # noqa: N802
         self._apply_scale(1.0)
+
+    # --- navigation -------------------------------------------------------------
+    def set_path(self, path: str) -> None:
+        """Swap the displayed image file in place (title updates via pathChanged)."""
+        path = os.path.abspath(path)
+        if path == self.filepath:
+            return
+        self.filepath = path
+        self.canvas.load(path)          # resets scale + repaints
+        self.pathChanged.emit()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Left:
+                self.navigateRequested.emit(-1)
+                return True
+            if event.key() == Qt.Key_Right:
+                self.navigateRequested.emit(1)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Left:
+            self.navigateRequested.emit(-1)
+            return
+        if event.key() == Qt.Key_Right:
+            self.navigateRequested.emit(1)
+            return
+        super().keyPressEvent(event)
+
+
+def image_neighbor(path: str, step: int) -> str | None:
+    """Previous/next image in the same folder (alphabetical, wraps). None if none."""
+    folder = os.path.dirname(os.path.abspath(path))
+    name = os.path.basename(path)
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return None
+    images = sorted((e for e in entries if is_image(os.path.join(folder, e))),
+                    key=str.lower)
+    if name not in images:
+        return None
+    i = images.index(name)
+    return os.path.join(folder, images[(i + step) % len(images)])

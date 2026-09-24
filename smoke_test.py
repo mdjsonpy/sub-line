@@ -149,62 +149,90 @@ ctx.close_tabs_to_left(ctx.tabs, 0)
 ctx.close_others(ctx.tabs, 0)
 check("edge no-ops leave the tab alone", ctx.tab_count() == 1)
 
-# --- 5c-split. right-click "Split to the Right" ---
+# --- 5c-split. two-pane relocate model (move, no clone; max 2 groups) ---
 # real files so to_data records them (untitled panes have no filepath)
 f1 = os.path.join(d, "f1.txt"); open(f1, "w").write("one\n")
 f2 = os.path.join(d, "f2.txt"); open(f2, "w").write("two\n")
+f3 = os.path.join(d, "f3.txt"); open(f3, "w").write("three\n")
 
+# move a tab to the right -> creates the single allowed split group (relocate, no clone)
 sp = WorkspaceView(Workspace(id="wsplit", name="W", root=d, tabs=[], active=0), theme)
-sp.new_untitled()  # tab 0
-sp.new_untitled()  # tab 1
+sp.open_file(f1)
+sp.open_file(f2)                       # group0: [f1, f2], current = f2
 check("split starts with 2 tabs / 1 group", sp.tab_count() == 2 and len(sp._groups) == 1)
+sp.move_tab(sp.tabs, 1, "right")       # move f2 into a new right group
+check("move-right creates a 2nd group", len(sp._groups) == 2)
+check("left holds f1 only", sp.left_group().count() == 1
+      and sp.left_group().widget(0).filepath == os.path.abspath(f1))
+check("right holds f2 only (relocated, not cloned)", sp.right_group().count() == 1
+      and sp.right_group().widget(0).filepath == os.path.abspath(f2))
+check("no duplicate after move", sum(g.count() for g in sp._groups) == 2)
+check("right group is active after move", sp.active_group() is sp.right_group())
 
-ng = sp.split_to_right(sp.tabs)
-check("split creates a 2nd group", len(sp._groups) == 2 and ng is sp._groups[1])
-check("split group is to the right", sp._groups[1] is ng)
-check("split group holds 1 pane", ng.count() == 1)
-check("split group is now active", sp.active_group() is ng)
-clone = ng.widget(0)
-check("clone is an independent EditorPane", isinstance(clone, EditorPane))
-check("clone is not the same object", clone is not sp.tabs.widget(1))
+# move it back left -> the emptied group auto-collapses to a single group
+sp.move_tab(sp.right_group(), 0, "left")
+check("move-left auto-collapses to 1 group", len(sp._groups) == 1)
+check("both tabs back in the single group", sp.tab_count() == 2 and sp.tabs.count() == 2)
 
-# untitled clone copies the text but stays unmodified, and does not alias the original
+# open_in_side from a single group creates the right group
 sp2 = WorkspaceView(Workspace(id="wsplit2", name="W", root=d, tabs=[], active=0), theme)
-sp2.new_untitled()
-sp2.tabs.widget(0).setPlainText("copied")
-ng2 = sp2.split_to_right(sp2.tabs)
-check("clone copies untitled text", ng2.widget(0).toPlainText() == "copied")
-check("clone of untitled is unmodified", ng2.widget(0).isModified() is False)
-ng2.widget(0).setPlainText("changed")
-check("original untitled untouched after clone edit", sp2.tabs.widget(0).toPlainText() == "copied")
+sp2.open_file(f1)
+sp2.open_in_side(f2, "right")
+check("open_in_side creates the right group", len(sp2._groups) == 2)
+check("open_in_side right pane is f2", sp2.right_group().count() == 1
+      and sp2.right_group().widget(0).filepath == os.path.abspath(f2))
+# opening an already-open file in a side just focuses it (no new group, no clone)
+sp2.open_in_side(f1, "right")
+check("open_in_side on an open file keeps 2 tabs", sum(g.count() for g in sp2._groups) == 2)
 
-# file-backed split -> to_data records the two-group layout + active indices
-spf = WorkspaceView(Workspace(id="wsplitf", name="W", root=d, tabs=[], active=0), theme)
-spf.open_file(f1)
-spf.open_file(f2)                       # group0: [f1, f2], current = f2
-ngf = spf.split_to_right(spf.tabs)      # duplicate current (f2) into a new group
-check("file split: 2 groups", len(spf._groups) == 2)
-check("file split: group1 holds the cloned file",
-      ngf.count() == 1 and ngf.widget(0).filepath == os.path.abspath(f2))
-sd = spf.to_data()
-check("to_data has 2 split groups", len(sd.splits) == 2)
-check("to_data group 0 = [f1, f2]", sd.splits[0] == [os.path.abspath(f1), os.path.abspath(f2)])
-check("to_data group 1 = [f2]", sd.splits[1] == [os.path.abspath(f2)])
-check("to_data split_actives = [1, 0]", sd.split_actives == [1, 0])
-
-# restore a split layout from data (first non-empty group becomes active)
+# end_split merges every tab back into one group
 sp3 = WorkspaceView(Workspace(id="wsplit3", name="W", root=d, tabs=[], active=0), theme)
+sp3.open_file(f1)
+sp3.open_in_side(f2, "right")
+check("end_split starts from 2 groups", len(sp3._groups) == 2)
+sp3.end_split()
+check("end_split -> 1 group", len(sp3._groups) == 1)
+check("end_split keeps both tabs", sp3.tab_count() == 2 and sp3.tabs.count() == 2)
+
+# a 3rd group is never created: new opens reuse the right group
+sp4 = WorkspaceView(Workspace(id="wsplit4", name="W", root=d, tabs=[], active=0), theme)
+sp4.open_file(f1)
+sp4.open_in_side(f2, "right")
+sp4.open_in_side(f3, "right")          # reuses the existing right group
+check("3rd open reuses the right group (no 3rd group)", len(sp4._groups) == 2)
+check("right group now holds f2 + f3", sp4.right_group().count() == 2)
+
+# to_data records the two-group layout
+sp5 = WorkspaceView(Workspace(id="wsplit5", name="W", root=d, tabs=[], active=0), theme)
+sp5.open_file(f1)
+sp5.open_file(f2)
+sp5.move_tab(sp5.tabs, 1, "right")     # group0: [f1], group1: [f2]
+sd = sp5.to_data()
+check("to_data has 2 split groups", len(sd.splits) == 2)
+check("to_data group 0 = [f1]", sd.splits[0] == [os.path.abspath(f1)])
+check("to_data group 1 = [f2]", sd.splits[1] == [os.path.abspath(f2)])
+
+# restore a 2-group layout from data
+sp6 = WorkspaceView(Workspace(id="wsplit6", name="W", root=d, tabs=[], active=0), theme)
 sd3 = Workspace(
-    id="wsplit3", name="W", root=d, active=0,
-    tabs=[os.path.abspath(f1), os.path.abspath(f2), os.path.abspath(f2)],
-    splits=[[os.path.abspath(f1), os.path.abspath(f2)], [os.path.abspath(f2)]],
-    split_actives=[1, 0],
+    id="wsplit6", name="W", root=d, active=0,
+    tabs=[os.path.abspath(f1), os.path.abspath(f2)],
+    splits=[[os.path.abspath(f1)], [os.path.abspath(f2)]],
+    split_actives=[0, 0],
 )
-sp3.sync_from_data(sd3)
-check("restore: 2 groups", len(sp3._groups) == 2)
-check("restore: group sizes", sp3._groups[0].count() == 2 and sp3._groups[1].count() == 1)
-check("restore: group0 active index = 1", sp3._groups[0].currentIndex() == 1)
-check("restore: group1 active index = 0", sp3._groups[1].currentIndex() == 0)
+sp6.sync_from_data(sd3)
+check("restore: 2 groups", len(sp6._groups) == 2)
+check("restore: group sizes", sp6._groups[0].count() == 1 and sp6._groups[1].count() == 1)
+
+# restore caps a stale 3-group layout at 2 (extra tabs merge into the right group)
+sp7 = WorkspaceView(Workspace(id="wsplit7", name="W", root=d, tabs=[], active=0), theme)
+sd4 = Workspace(
+    id="wsplit7", name="W", root=d, active=0,
+    splits=[[os.path.abspath(f1)], [os.path.abspath(f2)], [os.path.abspath(f3)]],
+)
+sp7.sync_from_data(sd4)
+check("restore caps at 2 groups", len(sp7._groups) == 2)
+check("restore keeps all tabs (merged right)", sum(g.count() for g in sp7._groups) == 3)
 
 # --- 5c. image preview pane ---
 from PySide6.QtGui import QPixmap as _QPixmap
@@ -229,6 +257,45 @@ img_pane.resetZoom()
 check("resetZoom restores scale", img_pane.canvas.scale() == 1.0)
 img_pane.zoomOut()
 check("zoomOut decreases scale", img_pane.canvas.scale() < 1.0)
+img_pane.resetZoom()
+
+# image navigation: set_path swaps filepath + canvas in place (no new tab)
+other_png = os.path.join(tmpdir, "other.png")
+aaa_png = os.path.join(tmpdir, "aaa.png")
+_pm2 = _QPixmap(50, 40); _pm2.fill(_Qt.darkRed)
+_pm3 = _QPixmap(50, 40); _pm3.fill(_Qt.darkBlue)
+check("second png saved", _pm2.save(other_png))
+check("third png saved", _pm3.save(aaa_png))
+img_pane.set_path(other_png)
+check("set_path swaps the displayed image",
+      img_pane.filepath == os.path.abspath(other_png))
+check("set_path reloads the pixmap", img_pane.canvas._pixmap is not None
+      and img_pane.canvas._pixmap.width() == 50)
+
+# image_neighbor: alphabetically adjacent image in the same folder, wraps around
+from texteditor.image_view import image_neighbor
+_n = image_neighbor(other_png, 1)
+check("neighbor +1 of other = valid",
+      _n is not None and os.path.basename(_n) == "valid.png")
+_n = image_neighbor(other_png, -1)
+check("neighbor -1 of other = aaa",
+      _n is not None and os.path.basename(_n) == "aaa.png")
+_n = image_neighbor(valid_png, 1)
+check("neighbor wraps +1 from valid -> aaa",
+      _n is not None and os.path.basename(_n) == "aaa.png")
+_n = image_neighbor(aaa_png, -1)
+check("neighbor wraps -1 from aaa -> valid",
+      _n is not None and os.path.basename(_n) == "valid.png")
+
+# navigateRequested: Left/Right arrows emit -1 / +1
+from PySide6.QtGui import QKeyEvent as _QKE
+from PySide6.QtCore import QEvent as _QEV
+_nav = []
+img_pane.navigateRequested.connect(lambda s: _nav.append(s))
+img_pane.keyPressEvent(_QKE(_QEV.KeyPress, _Qt.Key_Left, _Qt.NoModifier))
+img_pane.keyPressEvent(_QKE(_QEV.KeyPress, _Qt.Key_Right, _Qt.NoModifier))
+check("Left arrow emits navigateRequested(-1)", -1 in _nav)
+check("Right arrow emits navigateRequested(+1)", 1 in _nav)
 
 # workspace routes image files to ImagePane (not the placeholder BinaryPane)
 wsv2 = WorkspaceView(Workspace(id="wimg", name="W", root=d, tabs=[], active=0), theme)

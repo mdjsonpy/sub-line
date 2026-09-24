@@ -99,3 +99,8 @@ def classify_file(path: str) -> str:
 
 def is_media(kind: str) -> bool:
     return kind in (KIND_IMAGE, KIND_VIDEO, KIND_AUDIO)
+
+
+def is_image(path: str) -> bool:
+    """Cheap extension-only image check (no file reads; safe for folder listing)."""
+    return os.path.splitext(path)[1].lower() in _IMAGE_EXTS
