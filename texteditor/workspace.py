@@ -345,6 +345,8 @@ class WorkspaceView(QWidget):
         act_move_right = menu.addAction("Move Tab to the Right")
         act_end = menu.addAction("End Split View")
         menu.addSeparator()
+        act_reveal = menu.addAction("Select in Tree View")
+        menu.addSeparator()
         act_close = menu.addAction("Close Tab")
         menu.addSeparator()
         act_right = menu.addAction("Close to the Right")
@@ -361,6 +363,18 @@ class WorkspaceView(QWidget):
         act_move_right.setEnabled((not split) or (split and group is left))
         act_end.setEnabled(split)
 
+        pane = group.widget(index)
+        path = getattr(pane, "filepath", None) if pane is not None else None
+        root = self.current_root()
+        if path and root:
+            path = os.path.abspath(path)
+            root = os.path.abspath(root)
+            act_reveal.setEnabled(
+                path == root or path.startswith(root + os.sep)
+            )
+        else:
+            act_reveal.setEnabled(False)
+
         chosen = menu.exec(QCursor.pos())
         if chosen is act_move_left:
             self.move_tab(group, index, "left")
@@ -368,6 +382,9 @@ class WorkspaceView(QWidget):
             self.move_tab(group, index, "right")
         elif chosen is act_end:
             self.end_split()
+        elif chosen is act_reveal:
+            self.tree.setVisible(True)
+            self.tree.selectPath(path)
         elif chosen is act_close:
             self.request_close_tab(index, group)
         elif chosen is act_right:

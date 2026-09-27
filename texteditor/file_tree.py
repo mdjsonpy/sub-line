@@ -383,6 +383,13 @@ class FileTree(QWidget):
 
     def selectPath(self, path: str) -> None:
         index = self._model.index(path)
-        if index.isValid():
-            self._view.setCurrentIndex(index)
-            self._view.scrollTo(index)
+        if not index.isValid():
+            return
+        # expand the ancestor folders (up to the tree root) so the node is visible
+        root_index = self._view.rootIndex()
+        ancestor = index.parent()
+        while ancestor.isValid() and ancestor != root_index:
+            self._view.expand(ancestor)
+            ancestor = ancestor.parent()
+        self._view.setCurrentIndex(index)
+        self._view.scrollTo(index)

@@ -139,6 +139,51 @@ class TestRevealInExplorer:
         assert emitted == []
 
 
+class TestSelectPathExpands:
+    """selectPath must expand collapsed ancestor folders and select the file."""
+
+    def test_expands_collapsed_ancestors_and_selects(self, tmp_path):
+        ft = make_tree()
+        root = os.fspath(tmp_path)
+        sub = os.path.join(root, "a", "b")
+        os.makedirs(sub)
+        f = os.path.join(sub, "file.txt")
+        with open(f, "w") as fh:
+            fh.write("x")
+
+        ft.setRoot(root)
+        a_idx = ft._model.index(os.path.join(root, "a"))
+        b_idx = ft._model.index(sub)
+        ft._view.collapse(a_idx)
+        ft._view.collapse(b_idx)
+        assert not ft._view.isExpanded(a_idx)
+        assert not ft._view.isExpanded(b_idx)
+
+        ft.selectPath(f)
+
+        app = QApplication.instance()
+        import time
+        deadline = time.time() + 3.0
+        while not (ft._view.isExpanded(a_idx) and ft._view.isExpanded(b_idx)):
+            app.processEvents()
+            if time.time() > deadline:
+                break
+        assert ft._view.isExpanded(a_idx)
+        assert ft._view.isExpanded(b_idx)
+        cur = ft._view.currentIndex()
+        assert cur.isValid()
+        assert os.path.normcase(os.path.normpath(ft._model.filePath(cur))) == \
+            os.path.normcase(os.path.normpath(f))
+
+    def test_select_path_of_missing_file_is_noop(self, tmp_path):
+        ft = make_tree()
+        root = os.fspath(tmp_path)
+        ft.setRoot(root)
+        before = ft._view.currentIndex()
+        ft.selectPath(os.path.join(root, "nope.txt"))
+        assert ft._view.currentIndex() == before
+
+
 class TestNewWorkspaceHere:
     def test_emits_signal_for_folder(self, tmp_path):
         ft = make_tree()
