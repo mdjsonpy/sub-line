@@ -1,7 +1,9 @@
 """Persistence of named workspaces to a JSON file.
 
-Location: ``$XDG_CONFIG_HOME/texteditor/workspaces.json``
-(defaulting to ``~/.config/texteditor/workspaces.json``).
+Location: ``$XDG_CONFIG_HOME/sub-line/workspaces.json``
+(defaulting to ``~/.config/sub-line/workspaces.json``).
+A legacy store at ``.../texteditor/workspaces.json`` is migrated to the new
+location on first launch.
 
 The store now also persists the visual layout (categories + ordering), the
 collapsed state of category headers, the selected (active) workspace, global
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 from dataclasses import dataclass, field, asdict
 
 
@@ -67,11 +70,25 @@ class StoreData:
 
 def config_dir() -> str:
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return os.path.join(base, "texteditor")
+    return os.path.join(base, "sub-line")
 
 
 def store_path() -> str:
     return os.path.join(config_dir(), "workspaces.json")
+
+
+def legacy_store_path() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "texteditor", "workspaces.json")
+
+
+def migrate_legacy_store(path: str | None = None) -> None:
+    """Copy the old ``texteditor`` store to the new ``sub-line`` location once."""
+    target = path or store_path()
+    legacy = legacy_store_path()
+    if os.path.exists(legacy) and not os.path.exists(target):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(legacy, target)
 
 
 def _parse_workspace(raw: dict) -> Workspace | None:
@@ -178,6 +195,8 @@ def _resolve_active_id(data: dict, layout: list[LayoutEntry], valid_ids: set) ->
 class WorkspacesStore:
     def __init__(self, path: str | None = None) -> None:
         self.path = path or store_path()
+        if path is None:
+            migrate_legacy_store(self.path)
 
     def load(self) -> StoreData:
         try:
