@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QMenu,
+    QApplication,
 )
 from PySide6.QtGui import QCursor
 from PySide6.QtCore import Qt, Signal
@@ -98,6 +99,11 @@ class WorkspaceView(QWidget):
         self._panes_splitter.setChildrenCollapsible(False)
         self._active_group = self.tabs
         rv.addWidget(self._panes_splitter)
+
+        # Track which split group has focus so new files open there.
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_focus_changed)
 
         self._main_splitter = QSplitter(Qt.Horizontal, self)
         self._main_splitter.addWidget(self.tree)
@@ -209,6 +215,22 @@ class WorkspaceView(QWidget):
         if pane is not None and isinstance(pane, EditorPane):
             self.find_bar.setPane(pane)
         self.activePaneChanged.emit(pane)
+
+    def _on_focus_changed(self, old, new) -> None:
+        """Remember the split group that gains focus, so new files open there."""
+        if new is None:
+            return
+        group = self._group_of_widget(new)
+        if group is not None:
+            self._active_group = group
+
+    def _group_of_widget(self, widget) -> QTabWidget | None:
+        w = widget
+        while w is not None:
+            if w in self._groups:
+                return w
+            w = w.parentWidget()
+        return None
 
     # --- tab management --------------------------------------------------------
     def _add_pane_to(self, group: QTabWidget, pane) -> None:
