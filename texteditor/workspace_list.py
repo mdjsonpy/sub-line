@@ -48,6 +48,7 @@ class WorkspaceList(QWidget):
     unlockRequested = Signal(str)           # workspace id (encrypted)
     lockRequested = Signal(str)             # workspace id (encrypted)
     changePasswordRequested = Signal(str)   # workspace id (encrypted)
+    newWorkspaceInCategoryRequested = Signal(str)  # category name
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -275,13 +276,17 @@ class WorkspaceList(QWidget):
     def _category_menu(self, item: QTreeWidgetItem) -> None:
         name = item.data(0, ROLE_REF)
         menu = QMenu(self)
+        act_new = menu.addAction("New Workspace")
+        menu.addSeparator()
         act_rename = menu.addAction("Rename Category")
         act_toggle = menu.addAction("Collapse" if item.isExpanded() else "Expand")
         act_up = menu.addAction("Move Up")
         act_down = menu.addAction("Move Down")
         act_delete = menu.addAction("Delete Category")
         chosen = menu.exec(QCursor.pos())
-        if chosen is act_rename:
+        if chosen is act_new:
+            self.newWorkspaceInCategoryRequested.emit(name)
+        elif chosen is act_rename:
             self.renameCategoryRequested.emit(name)
         elif chosen is act_toggle:
             item.setExpanded(not item.isExpanded())

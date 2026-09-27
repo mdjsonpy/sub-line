@@ -5,7 +5,7 @@
 - Emits ``fileActivated(path)`` when the user opens a file.
 - Emits ``pathDeleted(path)`` after a file or folder is deleted.
 - Shows the absolute root path under the header.
-- Right-click menu: New File / New Folder / New Todo / Copy Path / Move To / Delete.
+- Right-click menu: New File / New Folder / New Todo / New Workspace Here / Copy Path / Move To / Delete.
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ class FileTree(QWidget):
     pathDeleted = Signal(str)
     revealInExplorerRequested = Signal(str)
     openInGroupRequested = Signal(str, str)   # (path, "left"|"right")
+    createWorkspaceRequested = Signal(str)    # (folder path)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -131,11 +132,15 @@ class FileTree(QWidget):
         if not target or not os.path.isdir(target):
             return
         files = [p for p in sel if os.path.isfile(p)]
+        folder = next((p for p in sel if os.path.isdir(p)), None)
 
         menu = QMenu(self)
         act_file = menu.addAction("New File…")
         act_folder = menu.addAction("New Folder…")
         act_todo = menu.addAction("New Todo…")
+        act_ws = menu.addAction("New Workspace Here")
+        act_ws.setEnabled(folder is not None)
+        menu.addSeparator()
         act_copy = menu.addAction("Copy Absolute Path")
         act_copy.setEnabled(bool(sel))
         act_reveal = menu.addAction("Show in File Explorer")
@@ -171,6 +176,8 @@ class FileTree(QWidget):
             if ok:
                 if self.new_todo_in(target, name) is None:
                     QMessageBox.warning(self, "New Todo", "Could not create the Todo file.")
+        elif chosen is act_ws:
+            self.create_workspace_here(folder)
         elif chosen is act_copy:
             if not self.copy_selected_paths(sel):
                 self.copy_path_to_clipboard(self._root_path or "")
@@ -286,6 +293,13 @@ class FileTree(QWidget):
         for p in sel:
             self.revealInExplorerRequested.emit(p)
         return sel
+
+    def create_workspace_here(self, folder: str) -> bool:
+        """Emit ``createWorkspaceRequested`` for a selected folder path."""
+        if not folder or not os.path.isdir(folder):
+            return False
+        self.createWorkspaceRequested.emit(folder)
+        return True
 
     def move_selected_to(self, dest_dir: str, paths: list[str] | None = None) -> list[str]:
         out = []

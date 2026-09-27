@@ -137,3 +137,48 @@ class TestRevealInExplorer:
         missing = os.fspath(tmp_path) + os.sep + "nope.txt"
         assert ft.reveal_selected([missing]) == []
         assert emitted == []
+
+
+class TestNewWorkspaceHere:
+    def test_emits_signal_for_folder(self, tmp_path):
+        ft = make_tree()
+        emitted = []
+        ft.createWorkspaceRequested.connect(emitted.append)
+        d = os.fspath(tmp_path)
+        assert ft.create_workspace_here(d) is True
+        assert emitted == [d]
+
+    def test_rejects_non_folder(self, tmp_path):
+        ft = make_tree()
+        f = os.fspath(tmp_path) + os.sep + "a.txt"
+        with open(f, "w") as fh:
+            fh.write("x")
+        emitted = []
+        ft.createWorkspaceRequested.connect(emitted.append)
+        assert ft.create_workspace_here(f) is False
+        assert emitted == []
+
+    def test_rejects_missing_path(self):
+        ft = make_tree()
+        assert ft.create_workspace_here("/no/such/dir/xyz") is False
+
+    def test_main_window_creates_workspace_from_tree(self, tmp_path):
+        qapp()
+        from texteditor.main_window import MainWindow
+        from texteditor.theme import Theme
+        from texteditor.store import WorkspacesStore
+
+        store = WorkspacesStore(os.fspath(tmp_path) + os.sep + "ws.json")
+        mw = MainWindow(Theme(), store)
+        try:
+            d = os.fspath(tmp_path) + os.sep + "root"
+            os.makedirs(d)
+            before = len(mw._workspaces)
+            assert mw._view.tree.create_workspace_here(d) is True
+            assert len(mw._workspaces) == before + 1
+            created = mw._workspaces[-1]
+            assert os.path.abspath(created.root) == os.path.abspath(d)
+            assert created.encrypted is False
+            assert mw._current_index == len(mw._workspaces) - 1
+        finally:
+            mw.close()

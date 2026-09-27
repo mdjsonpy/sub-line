@@ -361,6 +361,89 @@ class TestWorkspaceMove:
             mw.close()
 
 
+class TestNewWorkspaceInCategory:
+    def _patch_dialog(self, monkeypatch, folder, encrypt=False, password=""):
+        monkeypatch.setattr(
+            mw_mod.NewWorkspaceDialog, "get",
+            staticmethod(lambda parent: (folder, encrypt, password)),
+        )
+
+    def test_new_workspace_in_category_places_under_category(self, tmp_path, monkeypatch):
+        root = os.fspath(tmp_path)
+        new_folder = os.path.join(root, "newproj")
+        os.makedirs(new_folder, exist_ok=True)
+        mw = make_main_window(
+            tmp_path, [ws("a", root)],
+            [LayoutEntry("category", "Work"), LayoutEntry("workspace", "a")],
+        )
+        try:
+            self._patch_dialog(monkeypatch, new_folder)
+            mw.new_workspace_in_category("Work")
+            assert mw._category_names() == ["Work"]
+            assert len(mw._workspaces) == 2
+            new_id = [w.id for w in mw._workspaces if w.id != "a"][0]
+            assert new_id in mw._category_members("Work")
+            assert [(e.kind, e.ref) for e in mw._layout] == [
+                ("category", "Work"), ("workspace", "a"), ("workspace", new_id),
+            ]
+        finally:
+            mw.close()
+
+    def test_new_workspace_in_category_appends_to_block_end(self, tmp_path, monkeypatch):
+        root = os.fspath(tmp_path)
+        new_folder = os.path.join(root, "proj")
+        os.makedirs(new_folder, exist_ok=True)
+        mw = make_main_window(
+            tmp_path, [ws("a", root), ws("b", root)],
+            [
+                LayoutEntry("category", "Work"), LayoutEntry("workspace", "a"),
+                LayoutEntry("category", "Other"), LayoutEntry("workspace", "b"),
+            ],
+        )
+        try:
+            self._patch_dialog(monkeypatch, new_folder)
+            mw.new_workspace_in_category("Work")
+            new_id = [w.id for w in mw._workspaces if w.id not in ("a", "b")][0]
+            # appended at the END of the Work block, before the Other category
+            assert [(e.kind, e.ref) for e in mw._layout] == [
+                ("category", "Work"), ("workspace", "a"), ("workspace", new_id),
+                ("category", "Other"), ("workspace", "b"),
+            ]
+        finally:
+            mw.close()
+
+    def test_new_workspace_in_category_cancelled(self, tmp_path, monkeypatch):
+        root = os.fspath(tmp_path)
+        mw = make_main_window(
+            tmp_path, [ws("a", root)],
+            [LayoutEntry("category", "Work"), LayoutEntry("workspace", "a")],
+        )
+        try:
+            monkeypatch.setattr(
+                mw_mod.NewWorkspaceDialog, "get",
+                staticmethod(lambda parent: None),
+            )
+            mw.new_workspace_in_category("Work")
+            assert [w.id for w in mw._workspaces] == ["a"]
+        finally:
+            mw.close()
+
+    def test_new_workspace_in_category_unknown_is_noop(self, tmp_path, monkeypatch):
+        root = os.fspath(tmp_path)
+        new_folder = os.path.join(root, "proj")
+        os.makedirs(new_folder, exist_ok=True)
+        mw = make_main_window(
+            tmp_path, [ws("a", root)], [LayoutEntry("workspace", "a")],
+        )
+        try:
+            self._patch_dialog(monkeypatch, new_folder)
+            mw.new_workspace_in_category("DoesNotExist")
+            assert [w.id for w in mw._workspaces] == ["a"]
+            assert mw._category_names() == []
+        finally:
+            mw.close()
+
+
 class TestDeleteCategory:
     def test_delete_closes_members_keeps_files(self, tmp_path, monkeypatch):
         root = os.fspath(tmp_path)

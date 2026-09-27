@@ -75,8 +75,10 @@ class MainWindow(QMainWindow):
         self._ws_list.unlockRequested.connect(self._on_unlock)
         self._ws_list.lockRequested.connect(self._on_lock)
         self._ws_list.changePasswordRequested.connect(self._on_change_password)
+        self._ws_list.newWorkspaceInCategoryRequested.connect(self.new_workspace_in_category)
         self._view.tree.toggleWorkspacesRequested.connect(self.toggle_workspaces)
         self._view.tree.revealInExplorerRequested.connect(self.reveal_in_explorer)
+        self._view.tree.createWorkspaceRequested.connect(self.new_workspace_from_folder)
         self._view.tabsChanged.connect(self._schedule_save)
 
         self._save_timer = QTimer(self)
@@ -296,13 +298,17 @@ class MainWindow(QMainWindow):
         folder, encrypt, password = result
         self.new_workspace_from_folder(folder, encrypt=encrypt, password=password)
 
-    def new_workspace_from_folder(self, folder: str, encrypt: bool = False, password: str = "") -> None:
+    def new_workspace_from_folder(self, folder: str, encrypt: bool = False, password: str = "") -> str | None:
+        """Create a plain/encrypted workspace rooted at ``folder``.
+
+        Returns the new workspace id on success, or ``None`` if the action was
+        cancelled or failed (e.g. encryption error)."""
         folder = os.path.abspath(folder)
         if encrypt and not password:
-            return
+            return None
         if self._current_index >= 0:
             if not self._view.confirm_close_all():
-                return
+                return None
             self._view.capture_into(self._workspaces[self._current_index])
         ws_id = uuid.uuid4().hex
         if encrypt:
@@ -316,7 +322,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Encryption failed", str(exc))
                 self._vaults.discard_orphan(ws_id)
                 self._refresh_list()
-                return
+                return None
         else:
             ws = Workspace(id=ws_id, name=None, root=folder, tabs=[], active=0)
         self._workspaces.append(ws)
@@ -326,6 +332,7 @@ class MainWindow(QMainWindow):
         self._view.load_workspace(ws)
         self._refresh_list()
         self._schedule_save()
+        return ws_id
 
     # --- encryption ------------------------------------------------------------
     def _vault_for(self, ws: Workspace):
@@ -581,6 +588,22 @@ class MainWindow(QMainWindow):
                     self._schedule_save()
                 return
 
+    def _place_workspace_in_category(self, ws_id: str, category: str) -> None:
+        """Re-home ``ws_id`` so it sits inside the ``category`` block, appended
+        at the end of that block."""
+        layout = [e for e in self._layout if not (e.kind == "workspace" and e.ref == ws_id)]
+        entry = LayoutEntry("workspace", ws_id)
+        for i, e in enumerate(layout):
+            if e.kind == "category" and e.ref == category:
+                k = i + 1
+                while k < len(layout) and layout[k].kind == "workspace":
+                    k += 1
+                layout.insert(k, entry)
+                break
+        self._layout = layout
+        self._refresh_list()
+        self._schedule_save()
+
     def move_workspace_to_category(self, ws_id: str) -> None:
         if self._index_of(ws_id) < 0:
             return
@@ -590,22 +613,28 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
-        layout = [e for e in self._layout if not (e.kind == "workspace" and e.ref == ws_id)]
-        entry = LayoutEntry("workspace", ws_id)
         if choice == "Uncategorized":
-            layout.insert(0, entry)
+            layout = [e for e in self._layout if not (e.kind == "workspace" and e.ref == ws_id)]
+            layout.insert(0, LayoutEntry("workspace", ws_id))
+            self._layout = layout
+            self._refresh_list()
+            self._schedule_save()
         else:
-            for i, e in enumerate(layout):
-                if e.kind == "category" and e.ref == choice:
-                    # append at the end of the category's block
-                    k = i + 1
-                    while k < len(layout) and layout[k].kind == "workspace":
-                        k += 1
-                    layout.insert(k, entry)
-                    break
-        self._layout = layout
-        self._refresh_list()
-        self._schedule_save()
+            self._place_workspace_in_category(ws_id, choice)
+
+    def new_workspace_in_category(self, category: str) -> None:
+        """Create a new workspace (via the New Workspace dialog) and file it
+        under ``category``."""
+        if category not in self._category_names():
+            return
+        result = NewWorkspaceDialog.get(self)
+        if result is None:
+            return
+        folder, encrypt, password = result
+        ws_id = self.new_workspace_from_folder(folder, encrypt=encrypt, password=password)
+        if ws_id is None:
+            return
+        self._place_workspace_in_category(ws_id, category)
 
     def move_category_up(self, name: str) -> None:
         self._move_category(name, -1)
