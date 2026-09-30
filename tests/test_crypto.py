@@ -16,7 +16,10 @@ from texteditor.crypto import (
     CryptoError,
     create_encrypted_workspace,
     decrypt_vault,
+    decrypt_workspace_inplace,
     encrypt_vault,
+    folder_has_plaintext,
+    merge_into_vault,
     pack_directory,
     secure_delete_dir,
     secure_delete_file,
@@ -197,3 +200,217 @@ class TestCreateEncryptedWorkspace:
         f.write_text("x")
         with pytest.raises(CryptoError):
             create_encrypted_workspace(str(f), "pw")
+
+
+class TestFolderHasPlaintext:
+    def test_plain_folder_is_true(self, tmp_path):
+        (tmp_path / "a.txt").write_text("x")
+        assert folder_has_plaintext(str(tmp_path)) is True
+
+    def test_vault_only_is_false(self, tmp_path):
+        (tmp_path / ".subline.vault").write_bytes(b"SLVC" + b"\x00" * 60)
+        assert folder_has_plaintext(str(tmp_path)) is False
+
+    def test_mixed_is_true(self, tmp_path):
+        (tmp_path / ".subline.vault").write_bytes(b"SLVC" + b"\x00" * 60)
+        (tmp_path / "new.txt").write_text("x")
+        assert folder_has_plaintext(str(tmp_path)) is True
+
+    def test_empty_folder_is_false(self, tmp_path):
+        assert folder_has_plaintext(str(tmp_path)) is False
+
+    def test_missing_folder_is_false(self, tmp_path):
+        assert folder_has_plaintext(str(tmp_path / "nope")) is False
+
+
+class TestDecryptWorkspaceInplace:
+    def test_roundtrip(self, tmp_path):
+        d = tmp_path / "ws"
+        (d / "sub").mkdir(parents=True)
+        (d / "top.txt").write_text("TOP")
+        (d / "sub" / "inner.txt").write_text("INNER")
+        create_encrypted_workspace(str(d), "secret")
+        assert not (d / "top.txt").exists()
+        result = decrypt_workspace_inplace(str(d), "secret")
+        assert result == str(d)
+        assert not (d / ".subline.vault").exists()
+        assert (d / "top.txt").read_text() == "TOP"
+        assert (d / "sub" / "inner.txt").read_text() == "INNER"
+
+    def test_wrong_password_raises_and_vault_intact(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("x")
+        create_encrypted_workspace(str(d), "correct")
+        with pytest.raises(CryptoError):
+            decrypt_workspace_inplace(str(d), "wrong")
+        assert (d / ".subline.vault").is_file()
+        assert not (d / "a.txt").exists()
+
+    def test_missing_vault_raises(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        with pytest.raises(CryptoError):
+            decrypt_workspace_inplace(str(d), "pw")
+
+    def test_empty_password_rejected(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / ".subline.vault").write_bytes(b"SLVC" + b"\x00" * 60)
+        with pytest.raises(CryptoError):
+            decrypt_workspace_inplace(str(d), "")
+
+    def test_non_directory_rejected(self, tmp_path):
+        f = tmp_path / "a.txt"
+        f.write_text("x")
+        with pytest.raises(CryptoError):
+            decrypt_workspace_inplace(str(f), "pw")
+
+
+class TestMergeIntoVault:
+    def test_basic_new_files_added(self, tmp_path):
+        d = tmp_path / "ws"
+        (d / "orig").mkdir(parents=True)
+        (d / "orig" / "a.txt").write_text("A")
+        vault = create_encrypted_workspace(str(d), "secret")
+        # add plaintext files next to the vault
+        (d / "new.txt").write_text("NEW")
+        (d / "sub2").mkdir()
+        (d / "sub2" / "b.txt").write_text("B")
+        assert folder_has_plaintext(str(d))
+        merge_into_vault(str(d), "secret", lambda rel: "overwrite")
+        assert os.listdir(d) == [os.path.basename(vault)]
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "orig" / "a.txt").read_text() == "A"
+        assert (out / "new.txt").read_text() == "NEW"
+        assert (out / "sub2" / "b.txt").read_text() == "B"
+
+    def test_collision_overwrite(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("VAULT-VERSION")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "a.txt").write_text("PLAIN-VERSION")
+        merge_into_vault(str(d), "secret", lambda rel: "overwrite")
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "a.txt").read_text() == "PLAIN-VERSION"
+
+    def test_collision_keep_vault(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("VAULT-VERSION")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "a.txt").write_text("PLAIN-VERSION")
+        merge_into_vault(str(d), "secret", lambda rel: "keep_vault")
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "a.txt").read_text() == "VAULT-VERSION"
+
+    def test_collision_keep_both(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("VAULT-VERSION")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "a.txt").write_text("PLAIN-VERSION")
+        merge_into_vault(str(d), "secret", lambda rel: "keep_both")
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "a.txt").read_text() == "VAULT-VERSION"
+        assert (out / "a (1).txt").read_text() == "PLAIN-VERSION"
+
+    def test_collision_keep_both_increments_suffix(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("V")
+        (d / "a (1).txt").write_text("V1")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "a.txt").write_text("P")
+        merge_into_vault(str(d), "secret", lambda rel: "keep_both")
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "a.txt").read_text() == "V"
+        assert (out / "a (1).txt").read_text() == "V1"
+        # "a (1).txt" already taken, so renamed to "a (2).txt"
+        assert (out / "a (2).txt").read_text() == "P"
+
+    def test_folder_merge_union(self, tmp_path):
+        d = tmp_path / "ws"
+        (d / "sub").mkdir(parents=True)
+        (d / "sub" / "v.txt").write_text("VAULT")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "sub").mkdir(exist_ok=True)
+        (d / "sub" / "p.txt").write_text("PLAIN")
+        merge_into_vault(str(d), "secret", lambda rel: "overwrite")
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "sub" / "v.txt").read_text() == "VAULT"
+        assert (out / "sub" / "p.txt").read_text() == "PLAIN"
+
+    def test_plaintext_securely_deleted_after_merge(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("SECRET-DATA")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "leak.txt").write_text("SECRET-DATA")
+        (d / "sub").mkdir()
+        (d / "sub" / "leak2.txt").write_text("SECRET-DATA")
+        merge_into_vault(str(d), "secret", lambda rel: "overwrite")
+        for dirpath, _dirnames, filenames in os.walk(d):
+            for name in filenames:
+                with open(os.path.join(dirpath, name), "rb") as fh:
+                    assert b"SECRET-DATA" not in fh.read()
+
+    def test_wrong_password_raises_and_plaintext_intact(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("VAULT")
+        vault = create_encrypted_workspace(str(d), "correct")
+        (d / "new.txt").write_text("PLAIN")
+        with pytest.raises(CryptoError):
+            merge_into_vault(str(d), "wrong", lambda rel: "overwrite")
+        assert (d / "new.txt").is_file()
+        assert (d / ".subline.vault").is_file()
+
+    def test_invalid_resolution_raises(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("V")
+        vault = create_encrypted_workspace(str(d), "secret")
+        (d / "a.txt").write_text("P")
+        with pytest.raises(CryptoError):
+            merge_into_vault(str(d), "secret", lambda rel: "bogus")
+        # vault must still be intact and decryptable
+        data = decrypt_vault(open(vault, "rb").read(), "secret")
+        out = tmp_path / "restored"
+        unpack_directory(data, str(out))
+        assert (out / "a.txt").read_text() == "V"
+
+    def test_none_resolution_raises(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("V")
+        create_encrypted_workspace(str(d), "secret")
+        (d / "a.txt").write_text("P")
+        with pytest.raises(CryptoError):
+            merge_into_vault(str(d), "secret", lambda rel: None)
+
+    def test_empty_password_rejected(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        with pytest.raises(CryptoError):
+            merge_into_vault(str(d), "", lambda rel: "overwrite")
+
+    def test_missing_vault_raises(self, tmp_path):
+        d = tmp_path / "ws"
+        d.mkdir()
+        (d / "a.txt").write_text("x")
+        with pytest.raises(CryptoError):
+            merge_into_vault(str(d), "pw", lambda rel: "overwrite")

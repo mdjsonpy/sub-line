@@ -75,6 +75,9 @@ class MainWindow(QMainWindow):
         self._ws_list.unlockRequested.connect(self._on_unlock)
         self._ws_list.lockRequested.connect(self._on_lock)
         self._ws_list.changePasswordRequested.connect(self._on_change_password)
+        self._ws_list.encryptRequested.connect(self._on_encrypt)
+        self._ws_list.decryptRequested.connect(self._on_decrypt)
+        self._ws_list.addFilesToVaultRequested.connect(self._on_add_files_to_vault)
         self._ws_list.newWorkspaceInCategoryRequested.connect(self.new_workspace_in_category)
         self._view.tree.toggleWorkspacesRequested.connect(self.toggle_workspaces)
         self._view.tree.revealInExplorerRequested.connect(self.reveal_in_explorer)
@@ -262,7 +265,7 @@ class MainWindow(QMainWindow):
                 self._view.workspace = ws
                 self._view.close_all_tabs()
             else:
-                self._view.load_workspace(ws)
+                self._view_load(ws)
 
         # restore window size + main splitter ratio
         self.resize(int(data.window["width"]), int(data.window["height"]))
@@ -287,7 +290,7 @@ class MainWindow(QMainWindow):
                 return
             self._view.capture_into(self._workspaces[self._current_index])
         self._current_index = index
-        self._view.load_workspace(target)
+        self._view_load(target)
         self._refresh_list()
         self._schedule_save()
 
@@ -329,7 +332,7 @@ class MainWindow(QMainWindow):
         self._layout.append(LayoutEntry("workspace", ws.id))
         self._rebuild_by_id()
         self._current_index = len(self._workspaces) - 1
-        self._view.load_workspace(ws)
+        self._view_load(ws)
         self._refresh_list()
         self._schedule_save()
         return ws_id
@@ -351,17 +354,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing vault",
                                 "This encrypted workspace has no vault file.")
             return False
+        # In the mixed state the workspace root stays the plaintext folder;
+        # the unlocked vault contents appear in the tree's separate
+        # "Encrypted" section (see ``_sync_tree_for_workspace``). A purely
+        # encrypted workspace has no plaintext, so its root is the temp dir.
+        folder = os.path.dirname(ws.vault_path) if ws.vault_path else ""
+        mixed = bool(folder) and crypto.folder_has_plaintext(folder)
         if vault.is_unlocked:
-            ws.root = vault.temp_path
+            ws.root = folder if mixed else vault.temp_path
             return True
         password = PasswordDialog.get_password(self, "Unlock workspace", "Password:")
         if password is None:
             return False
         try:
-            ws.root = vault.unlock(password)
+            temp = vault.unlock(password)
         except VaultError as exc:
             QMessageBox.warning(self, "Unlock failed", str(exc))
             return False
+        ws.root = folder if mixed else temp
         return True
 
     def _on_unlock(self, ws_id: str) -> None:
@@ -375,7 +385,7 @@ class MainWindow(QMainWindow):
             return
         self._refresh_list()
         if index == self._current_index:
-            self._view.load_workspace(ws)
+            self._view_load(ws)
         self._schedule_save()
 
     def _lock_workspace(self, ws: Workspace) -> bool:
@@ -400,6 +410,7 @@ class MainWindow(QMainWindow):
         if index == self._current_index:
             self._view.workspace = ws
             self._view.close_all_tabs()
+        self._sync_tree_for_workspace(ws)
         self._refresh_list()
         self._schedule_save()
 
@@ -426,6 +437,166 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(self, "Password changed",
                                 "The workspace password was updated.")
+
+    # --- encrypt / decrypt / merge ---------------------------------------------
+    def _view_load(self, ws: Workspace) -> None:
+        """Load ``ws`` into the editor view and resync the file tree sections."""
+        self._view.load_workspace(ws)
+        self._sync_tree_for_workspace(ws)
+
+    def _sync_tree_for_workspace(self, ws: Workspace) -> None:
+        """Show/hide the tree's vault section for ``ws``.
+
+        The vault section is visible only for a mixed workspace whose vault
+        is currently unlocked (its contents live in the temp dir)."""
+        if (
+            ws.encrypted
+            and ws.vault_path
+            and crypto.folder_has_plaintext(os.path.dirname(ws.vault_path))
+        ):
+            vault = self._vault_for(ws)
+            if vault is not None and vault.is_unlocked and vault.temp_path:
+                self._view.tree.set_vault_root(vault.temp_path)
+                return
+        self._view.tree.clear_vault_root()
+
+    def _resolve_collision(self, rel_path: str) -> str:
+        """Ask how to resolve a vault/plaintext path conflict.
+
+        Returns ``"overwrite"``, ``"keep_vault"``, ``"keep_both"``, or
+        ``"cancelled"`` (which aborts the merge)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("File conflict")
+        box.setText(f'"{rel_path}" exists in both the vault and the folder.')
+        box.setInformativeText("How do you want to resolve this?")
+        overwrite = box.addButton("Overwrite with plaintext", QMessageBox.AcceptRole)
+        keep_vault = box.addButton("Keep vault version", QMessageBox.RejectRole)
+        keep_both = box.addButton("Keep both (rename)", QMessageBox.ActionRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is overwrite:
+            return "overwrite"
+        if clicked is keep_vault:
+            return "keep_vault"
+        if clicked is keep_both:
+            return "keep_both"
+        return "cancelled"
+
+    def _on_encrypt(self, ws_id: str) -> None:
+        index = self._index_of(ws_id)
+        if index < 0:
+            return
+        ws = self._workspaces[index]
+        if ws.encrypted:
+            return
+        folder = ws.root
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "Encrypt failed",
+                                "This workspace has no folder to encrypt.")
+            return
+        if index == self._current_index:
+            if not self._view.confirm_close_all():
+                return
+            self._view.close_all_tabs()
+        password = PasswordDialog.get_password(self, "Encrypt workspace", "New password:")
+        if not password:
+            return
+        try:
+            vault_path = crypto.create_encrypted_workspace(folder, password)
+        except (crypto.CryptoError, OSError) as exc:
+            QMessageBox.warning(self, "Encrypt failed", str(exc))
+            return
+        ws.encrypted = True
+        ws.vault_path = vault_path
+        ws.root = ""
+        ws.tabs = []
+        ws.active = 0
+        ws.splits = []
+        ws.split_actives = []
+        if index == self._current_index:
+            self._view.workspace = ws
+        self._sync_tree_for_workspace(ws)
+        self._refresh_list()
+        self._schedule_save()
+
+    def _on_decrypt(self, ws_id: str) -> None:
+        index = self._index_of(ws_id)
+        if index < 0:
+            return
+        ws = self._workspaces[index]
+        if not ws.encrypted or not ws.vault_path:
+            return
+        folder = os.path.dirname(ws.vault_path)
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, "Decrypt failed",
+                                "The workspace folder no longer exists.")
+            return
+        if index == self._current_index:
+            if not self._view.confirm_close_all():
+                return
+        vault = self._vault_for(ws)
+        if vault is not None and vault.is_unlocked and not self._lock_workspace(ws):
+            return
+        if index == self._current_index:
+            self._view.close_all_tabs()
+        password = PasswordDialog.get_password(self, "Decrypt workspace", "Password:")
+        if password is None:
+            return
+        try:
+            crypto.decrypt_workspace_inplace(folder, password)
+        except (crypto.CryptoError, OSError) as exc:
+            QMessageBox.warning(self, "Decrypt failed", str(exc))
+            return
+        ws.encrypted = False
+        ws.vault_path = None
+        ws.root = folder
+        ws.tabs = []
+        ws.active = 0
+        ws.splits = []
+        ws.split_actives = []
+        if index == self._current_index:
+            self._view_load(ws)
+        self._sync_tree_for_workspace(ws)
+        self._refresh_list()
+        self._schedule_save()
+
+    def _on_add_files_to_vault(self, ws_id: str) -> None:
+        index = self._index_of(ws_id)
+        if index < 0:
+            return
+        ws = self._workspaces[index]
+        if not ws.encrypted or not ws.vault_path:
+            return
+        folder = os.path.dirname(ws.vault_path)
+        if not os.path.isdir(folder) or not crypto.folder_has_plaintext(folder):
+            return
+        if index == self._current_index:
+            if not self._view.confirm_close_all():
+                return
+        vault = self._vault_for(ws)
+        if vault is not None and vault.is_unlocked and not self._lock_workspace(ws):
+            return
+        if index == self._current_index:
+            self._view.close_all_tabs()
+        password = PasswordDialog.get_password(self, "Add files to vault", "Vault password:")
+        if password is None:
+            return
+        try:
+            crypto.merge_into_vault(folder, password, self._resolve_collision)
+        except (crypto.CryptoError, OSError) as exc:
+            QMessageBox.warning(self, "Add to vault failed", str(exc))
+            return
+        ws.root = ""
+        ws.tabs = []
+        ws.active = 0
+        ws.splits = []
+        ws.split_actives = []
+        if index == self._current_index:
+            self._view_load(ws)
+        self._sync_tree_for_workspace(ws)
+        self._refresh_list()
+        self._schedule_save()
 
     def _recover_vaults(self) -> None:
         """Re-encrypt temp directories left behind by a crash, then lock all
@@ -455,13 +626,14 @@ class MainWindow(QMainWindow):
         if self._workspaces:
             if closing_current:
                 self._current_index = min(index, len(self._workspaces) - 1)
-                self._view.load_workspace(self._workspaces[self._current_index])
+                self._view_load(self._workspaces[self._current_index])
             else:
                 self._current_index = self._index_of(current_id)
         else:
             self._current_index = -1
             self._view.close_all_tabs()
             self._view.workspace = None
+            self._view.tree.clear_vault_root()
         self._refresh_list()
         self._schedule_save()
 
@@ -553,11 +725,12 @@ class MainWindow(QMainWindow):
             self._current_index = self._index_of(current_id)
         elif self._workspaces:
             self._current_index = 0
-            self._view.load_workspace(self._workspaces[0])
+            self._view_load(self._workspaces[0])
         else:
             self._current_index = -1
             self._view.close_all_tabs()
             self._view.workspace = None
+            self._view.tree.clear_vault_root()
         self._refresh_list()
         self._schedule_save()
 

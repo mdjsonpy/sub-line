@@ -230,3 +230,131 @@ def create_encrypted_workspace(folder: str, password: str) -> str:
     os.replace(tmp, vault_file)
     _purge_except(folder, ".subline.vault")
     return vault_file
+
+
+def folder_has_plaintext(folder: str) -> bool:
+    """Return True if ``folder`` contains any entry other than
+    ``.subline.vault`` (i.e. the workspace is in "mixed" state).
+    """
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        return False
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return False
+    return any(name != ".subline.vault" for name in entries)
+
+
+def decrypt_workspace_inplace(folder: str, password: str) -> str:
+    """Decrypt ``<folder>/.subline.vault`` in place and extract the
+    contents into ``folder``, then securely delete the vault file.
+
+    Returns the folder path. On a wrong password or corrupt vault,
+    raises :class:`CryptoError` and leaves the vault intact.
+    """
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        raise CryptoError(f"not a directory: {folder}")
+    if not password:
+        raise CryptoError("password must not be empty")
+    vault_file = os.path.join(folder, ".subline.vault")
+    if not os.path.isfile(vault_file):
+        raise CryptoError(f"vault file not found: {vault_file}")
+    with open(vault_file, "rb") as fh:
+        data = fh.read()
+    tar = decrypt_vault(data, password)
+    unpack_directory(tar, folder)
+    secure_delete_file(vault_file)
+    return folder
+
+
+def _next_renamed(path: str) -> str:
+    """Return ``path`` with a numeric suffix `` (1)``, `` (2)``, ...
+    inserted before the extension, picking the first name that does not
+    exist on disk.
+    """
+    directory, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    i = 1
+    while True:
+        candidate = os.path.join(directory, f"{stem} ({i}){ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def merge_into_vault(
+    folder: str,
+    password: str,
+    resolve_collision,
+) -> str:
+    """Merge all plaintext files in ``folder`` into
+    ``<folder>/.subline.vault``, then securely delete the plaintext.
+
+    ``resolve_collision(rel_path)`` is called for every path that exists
+    in both vault and plaintext. It must return one of ``"overwrite"``,
+    ``"keep_vault"``, or ``"keep_both"``. Any other return value (or a
+    raised exception) aborts the merge and raises :class:`CryptoError`.
+
+    Returns the vault file path. The folder is left containing only
+    ``.subline.vault``.
+    """
+    import tempfile
+
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        raise CryptoError(f"not a directory: {folder}")
+    if not password:
+        raise CryptoError("password must not be empty")
+    vault_file = os.path.join(folder, ".subline.vault")
+    if not os.path.isfile(vault_file):
+        raise CryptoError(f"vault file not found: {vault_file}")
+    with open(vault_file, "rb") as fh:
+        data = fh.read()
+    tar = decrypt_vault(data, password)
+
+    tmpdir = tempfile.mkdtemp(prefix="subline-merge-")
+    try:
+        unpack_directory(tar, tmpdir)
+        for dirpath, _dirnames, filenames in os.walk(folder):
+            for name in filenames:
+                if name == ".subline.vault":
+                    continue
+                src = os.path.join(dirpath, name)
+                rel = os.path.relpath(src, folder)
+                dest = os.path.join(tmpdir, rel)
+                if os.path.exists(dest):
+                    resolution = resolve_collision(rel)
+                    if resolution == "overwrite":
+                        if os.path.isdir(dest) and not os.path.islink(dest):
+                            shutil.rmtree(dest)
+                        elif os.path.exists(dest):
+                            os.unlink(dest)
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        shutil.copy2(src, dest)
+                    elif resolution == "keep_vault":
+                        pass
+                    elif resolution == "keep_both":
+                        dest = _next_renamed(dest)
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        shutil.copy2(src, dest)
+                    else:
+                        raise CryptoError(
+                            f"invalid collision resolution for {rel!r}: {resolution!r}"
+                        )
+                else:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    shutil.copy2(src, dest)
+        merged_tar = pack_directory(tmpdir)
+        merged_data = encrypt_vault(merged_tar, password)
+        tmp = vault_file + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(merged_data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, vault_file)
+        _purge_except(folder, ".subline.vault")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return vault_file

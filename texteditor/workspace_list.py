@@ -8,6 +8,8 @@ positional index).
 """
 from __future__ import annotations
 
+import os
+
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -22,12 +24,14 @@ from PySide6.QtGui import QCursor, QFont, QColor
 from PySide6.QtCore import Qt, Signal
 
 from .store import LayoutEntry
+from .crypto import folder_has_plaintext
 
 ROLE_KIND = Qt.UserRole        # "category" | "workspace"
 ROLE_REF = Qt.UserRole + 1     # category name, OR workspace id
 ROLE_LABEL = Qt.UserRole + 2   # base label (workspaces)
 ROLE_ROOT = Qt.UserRole + 3    # workspace root path
 ROLE_ENCRYPTED = Qt.UserRole + 4  # bool: workspace is an encrypted vault
+ROLE_VAULT_PATH = Qt.UserRole + 5  # vault file path (encrypted workspaces)
 
 
 class WorkspaceList(QWidget):
@@ -48,6 +52,9 @@ class WorkspaceList(QWidget):
     unlockRequested = Signal(str)           # workspace id (encrypted)
     lockRequested = Signal(str)             # workspace id (encrypted)
     changePasswordRequested = Signal(str)   # workspace id (encrypted)
+    encryptRequested = Signal(str)          # workspace id (plain)
+    decryptRequested = Signal(str)          # workspace id (encrypted)
+    addFilesToVaultRequested = Signal(str)  # workspace id (mixed)
     newWorkspaceInCategoryRequested = Signal(str)  # category name
 
     def __init__(self, parent=None) -> None:
@@ -97,13 +104,15 @@ class WorkspaceList(QWidget):
         return item
 
     def _make_workspace(self, parent, ws_id: str, label: str, root: str,
-                        encrypted: bool = False) -> QTreeWidgetItem:
+                        encrypted: bool = False,
+                        vault_path: str | None = None) -> QTreeWidgetItem:
         item = QTreeWidgetItem(parent, [label])
         item.setData(0, ROLE_KIND, "workspace")
         item.setData(0, ROLE_REF, ws_id)
         item.setData(0, ROLE_LABEL, label)
         item.setData(0, ROLE_ROOT, root or "")
         item.setData(0, ROLE_ENCRYPTED, bool(encrypted))
+        item.setData(0, ROLE_VAULT_PATH, vault_path or "")
         item.setFont(0, self._normal_font())
         if encrypted:
             item.setForeground(0, QColor("#e06060"))
@@ -129,7 +138,8 @@ class WorkspaceList(QWidget):
                 label = ws.name or ws.root or "?"
                 parent = current_category if current_category is not None else self.tree
                 self._make_workspace(parent, entry.ref, label, ws.root or "",
-                                     encrypted=bool(getattr(ws, "encrypted", False)))
+                                     encrypted=bool(getattr(ws, "encrypted", False)),
+                                     vault_path=getattr(ws, "vault_path", None))
         self.set_active(active_id)
 
     def set_active(self, active_id: str | None) -> None:
@@ -201,14 +211,24 @@ class WorkspaceList(QWidget):
         if chosen is act_new_cat:
             self.newCategoryRequested.emit()
 
+    def _is_mixed(self, item: QTreeWidgetItem) -> bool:
+        """True if this encrypted workspace also has plaintext files in its
+        folder (mixed state)."""
+        vault = item.data(0, ROLE_VAULT_PATH) or ""
+        if not vault:
+            return False
+        folder = os.path.dirname(vault)
+        return folder_has_plaintext(folder)
+
     def _build_workspace_menu(self, item: QTreeWidgetItem):
         """Build (but do not show) the workspace context menu.
 
         Returns ``(menu, acts, ws_id, root)`` where ``acts`` maps a stable
         action name (``rename``, ``unlock``, ``lock``, ``chpw``, ``copy``,
-        ``open``, ``terminal``, ``up``, ``down``, ``movecat``, ``close``) to
-        its ``QAction``. Encrypted workspaces expose the vault actions and
-        hide the file-path actions; plain workspaces do the reverse.
+        ``open``, ``terminal``, ``encrypt``, ``decrypt``, ``addfiles``,
+        ``up``, ``down``, ``movecat``, ``close``) to its ``QAction``.
+        Encrypted workspaces expose the vault actions and hide the
+        file-path actions; plain workspaces do the reverse.
         """
         ws_id = item.data(0, ROLE_REF)
         root = item.data(0, ROLE_ROOT) or ""
@@ -221,11 +241,19 @@ class WorkspaceList(QWidget):
             acts["unlock"] = menu.addAction("Unlock…")
             acts["lock"] = menu.addAction("Lock")
             acts["chpw"] = menu.addAction("Change Password…")
-        elif root:
             menu.addSeparator()
-            acts["copy"] = menu.addAction("Copy Absolute Path")
-            acts["open"] = menu.addAction("Open in File Explorer")
-            acts["terminal"] = menu.addAction("Open Terminal Here")
+            mixed = self._is_mixed(item)
+            if mixed:
+                acts["addfiles"] = menu.addAction("Add files to vault…")
+            acts["decrypt"] = menu.addAction("Decrypt…")
+        else:
+            if root:
+                menu.addSeparator()
+                acts["copy"] = menu.addAction("Copy Absolute Path")
+                acts["open"] = menu.addAction("Open in File Explorer")
+                acts["terminal"] = menu.addAction("Open Terminal Here")
+            menu.addSeparator()
+            acts["encrypt"] = menu.addAction("Encrypt…")
         menu.addSeparator()
         acts["up"] = menu.addAction("Move Up")
         acts["down"] = menu.addAction("Move Down")
@@ -259,6 +287,12 @@ class WorkspaceList(QWidget):
             self.openFolderRequested.emit(root)
         elif key == "terminal":
             self.openTerminalRequested.emit(root)
+        elif key == "encrypt":
+            self.encryptRequested.emit(ws_id)
+        elif key == "decrypt":
+            self.decryptRequested.emit(ws_id)
+        elif key == "addfiles":
+            self.addFilesToVaultRequested.emit(ws_id)
         elif key == "up":
             self.moveUpRequested.emit(ws_id)
         elif key == "down":

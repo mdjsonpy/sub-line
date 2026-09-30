@@ -81,6 +81,36 @@ class FileTree(QWidget):
 
         layout.addWidget(self._view)
 
+        # Vault section (mixed state): read-only view of unlocked vault contents.
+        self._vault_label = QLabel("\U0001F512 Encrypted", self)
+        self._vault_label.setStyleSheet(
+            "padding: 4px 10px 2px 10px; font-weight: bold; color: #e06060;")
+        self._vault_label.hide()
+
+        self._vault_model = QFileSystemModel(self)
+        self._vault_model.setFilter(QDir.Files | QDir.Dirs | QDir.NoDotAndDotDot)
+        self._vault_model.setRootPath("")
+
+        self._vault_view = QTreeView(self)
+        self._vault_view.setModel(self._vault_model)
+        self._vault_view.setAnimated(True)
+        self._vault_view.setUniformRowHeights(True)
+        self._vault_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._vault_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._vault_view.setHeaderHidden(True)
+        vroot = self._vault_model.index("")
+        for col in range(1, self._vault_model.columnCount(vroot)):
+            self._vault_view.setColumnHidden(col, True)
+        self._vault_view.setIndentation(16)
+        self._vault_view.setExpandsOnDoubleClick(True)
+        self._vault_view.setRootIsDecorated(True)
+        self._vault_view.setContextMenuPolicy(Qt.NoContextMenu)
+        self._vault_view.activated.connect(self._on_vault_activated)
+        self._vault_view.hide()
+
+        layout.addWidget(self._vault_label)
+        layout.addWidget(self._vault_view)
+
         bottom = QWidget(self)
         bl = QHBoxLayout(bottom)
         bl.setContentsMargins(8, 6, 8, 6)
@@ -380,6 +410,30 @@ class FileTree(QWidget):
 
     def currentRoot(self) -> str | None:
         return self._root_path
+
+    def set_vault_root(self, path: str) -> None:
+        """Show the vault section rooted at ``path`` (unlocked temp dir)."""
+        if not path:
+            self.clear_vault_root()
+            return
+        self._vault_model.setRootPath(path)
+        index = self._vault_model.index(path)
+        self._vault_view.setRootIndex(index)
+        self._vault_view.expand(index)
+        self._vault_label.show()
+        self._vault_view.show()
+
+    def clear_vault_root(self) -> None:
+        """Hide the vault section."""
+        self._vault_model.setRootPath("")
+        self._vault_view.setRootIndex(self._vault_model.index(""))
+        self._vault_label.hide()
+        self._vault_view.hide()
+
+    def _on_vault_activated(self, index) -> None:
+        path = self._vault_model.filePath(index)
+        if path and os.path.isfile(path):
+            self.fileActivated.emit(path)
 
     def selectPath(self, path: str) -> None:
         index = self._model.index(path)
