@@ -1,4 +1,4 @@
-"""Folder sidebar: a QTreeView backed by QFileSystemModel.
+"""Folder sidebar: a QTreeView backed by QFileSystemModel (or MemoryTreeModel).
 
 - Hides dotfiles / hidden directories (default filter).
 - Auto-refreshes on filesystem changes (QFileSystemModel built-in watcher).
@@ -28,9 +28,10 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from PySide6.QtGui import QCursor
-from PySide6.QtCore import Signal, QDir, Qt
+from PySide6.QtCore import Signal, QDir, Qt, QModelIndex
 
 from .todos import Todos, TodosStore
+from .memory_tree_model import MemoryTreeModel
 
 
 class FileTree(QWidget):
@@ -43,6 +44,9 @@ class FileTree(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._fs = None  # WorkspaceFS; when set, all I/O goes through it
+        self._is_memory = False
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -60,6 +64,7 @@ class FileTree(QWidget):
         self._model = QFileSystemModel(self)
         self._model.setFilter(QDir.Files | QDir.Dirs | QDir.NoDotAndDotDot)
         self._model.setRootPath("")
+        self._fs_model = self._model  # persistent QFileSystemModel (restored when leaving memory mode)
 
         self._view = QTreeView(self)
         self._view.setModel(self._model)
@@ -82,9 +87,9 @@ class FileTree(QWidget):
         layout.addWidget(self._view)
 
         # Vault section (mixed state): read-only view of unlocked vault contents.
-        self._vault_label = QLabel("\U0001F512 Encrypted", self)
+        self._vault_label = QLabel("\U0001F513 Vault", self)
         self._vault_label.setStyleSheet(
-            "padding: 4px 10px 2px 10px; font-weight: bold; color: #e06060;")
+            "padding: 4px 10px 2px 10px; font-weight: bold; color: #6aa9e0;")
         self._vault_label.hide()
 
         self._vault_model = QFileSystemModel(self)
@@ -122,9 +127,73 @@ class FileTree(QWidget):
 
         self._root_path: str | None = None
 
+    # --- FS abstraction helpers --------------------------------------------------
+    def _is_file(self, path: str) -> bool:
+        if self._fs is not None:
+            return self._fs.isfile(path)
+        return os.path.isfile(path)
+
+    def _is_dir(self, path: str) -> bool:
+        if self._fs is not None:
+            return self._fs.isdir(path)
+        return os.path.isdir(path)
+
+    def _exists(self, path: str) -> bool:
+        if self._fs is not None:
+            return self._fs.exists(path)
+        return os.path.exists(path)
+
+    def _path_index(self, model, path: str) -> QModelIndex:
+        """Get a QModelIndex from an absolute path, works for both model types."""
+        if hasattr(model, "index_by_path"):
+            return model.index_by_path(path)
+        return model.index(path)
+
+    def _model_path(self, model, index) -> str:
+        """Get the absolute path for an index, works for both model types."""
+        return model.filePath(index)
+
+    def set_fs(self, fs) -> None:
+        """Set the WorkspaceFS. Swap to MemoryTreeModel for memory workspaces,
+        restore the QFileSystemModel otherwise."""
+        self._fs = fs
+        self._is_memory = fs is not None and fs.is_memory
+        if self._is_memory and self._root_path:
+            self._switch_to_memory_model(self._root_path)
+        elif self._model is not self._fs_model:
+            self._restore_fs_model()
+
+    def _restore_fs_model(self) -> None:
+        """Restore the QFileSystemModel as the active model (non-encrypted workspace)."""
+        if self._model is self._fs_model:
+            return
+        self._view.setModel(self._fs_model)
+        self._view.setHeaderHidden(True)
+        root_idx = self._fs_model.index("")
+        for col in range(1, self._fs_model.columnCount(root_idx)):
+            self._view.setColumnHidden(col, True)
+        self._model = self._fs_model
+
+    def _switch_to_memory_model(self, root: str) -> None:
+        """Replace the QFileSystemModel with a MemoryTreeModel."""
+        tree = self._fs.tree
+        model = MemoryTreeModel(tree, root, self)
+        self._view.setModel(model)
+        self._view.setHeaderHidden(True)
+        vroot = model.index(0, 0)
+        for col in range(1, model.columnCount(vroot)):
+            self._view.setColumnHidden(col, True)
+        self._model = model
+        index = model.index_by_path(root)
+        self._view.setRootIndex(index)
+        if index.isValid():
+            self._view.expand(index)
+            self._view.setCurrentIndex(index)
+
+    # --- activation / selection --------------------------------------------------
     def _on_activated(self, index) -> None:
-        path = self._model.filePath(index)
-        if path and os.path.isfile(path):
+        path = self._model_path(self._model, index)
+        if path and self._is_file(path):
             self.fileActivated.emit(path)
 
     def selected_paths(self) -> list[str]:
@@ -133,7 +202,7 @@ class FileTree(QWidget):
             return []
         out = []
         for idx in sm.selectedRows(0):
-            p = self._model.filePath(idx)
+            p = self._model_path(self._model, idx)
             if p:
                 out.append(p)
         return out
@@ -143,26 +212,26 @@ class FileTree(QWidget):
         sel = self.selected_paths()
         if not sel:
             idx = self._view.indexAt(pos)
-            p = self._model.filePath(idx) if idx.isValid() else ""
+            p = self._model_path(self._model, idx) if idx.isValid() else ""
             sel = [p] if p else []
         return sel
 
     def _new_target(self, sel: list[str]) -> str | None:
         for p in sel:
-            if os.path.isdir(p):
+            if self._is_dir(p):
                 return p
         for p in sel:
-            if os.path.isfile(p):
+            if self._is_file(p):
                 return os.path.dirname(p)
         return self._root_path
 
     def _on_context_menu(self, pos) -> None:
         sel = self._context_selection(pos)
         target = self._new_target(sel) if sel else self._root_path
-        if not target or not os.path.isdir(target):
+        if not target or not self._is_dir(target):
             return
-        files = [p for p in sel if os.path.isfile(p)]
-        folder = next((p for p in sel if os.path.isdir(p)), None)
+        files = [p for p in sel if self._is_file(p)]
+        folder = next((p for p in sel if self._is_dir(p)), None)
 
         menu = QMenu(self)
         act_file = menu.addAction("New File…")
@@ -248,13 +317,17 @@ class FileTree(QWidget):
         if not name:
             return None
         path = os.path.join(dir_path, name)
-        if os.path.exists(path):
+        if self._exists(path):
             return None
         try:
-            with open(path, "a", encoding="utf-8"):
-                pass
+            if self._fs is not None:
+                self._fs.write_bytes(path, b"")
+            else:
+                with open(path, "a", encoding="utf-8"):
+                    pass
         except OSError:
             return None
+        self._refresh_model()
         self.selectPath(path)
         self.fileActivated.emit(path)
         return path
@@ -264,12 +337,16 @@ class FileTree(QWidget):
         if not name:
             return None
         path = os.path.join(dir_path, name)
-        if os.path.exists(path):
+        if self._exists(path):
             return None
         try:
-            os.makedirs(path)
+            if self._fs is not None:
+                self._fs.mkdir(path)
+            else:
+                os.makedirs(path)
         except OSError:
             return None
+        self._refresh_model()
         self.selectPath(path)
         return path
 
@@ -281,14 +358,16 @@ class FileTree(QWidget):
         if not name.lower().endswith(".todo"):
             name += ".todo"
         path = os.path.join(dir_path, name)
-        if os.path.exists(path):
+        if self._exists(path):
             return None
         try:
             todos = Todos()
             todos.add_category("General")
-            TodosStore().save(todos, path)
+            store = TodosStore(fs=self._fs)
+            store.save(todos, path)
         except (OSError, ValueError):
             return None
+        self._refresh_model()
         self.selectPath(path)
         self.fileActivated.emit(path)
         return path
@@ -312,21 +391,21 @@ class FileTree(QWidget):
         return True
 
     def open_selected(self, paths: list[str] | None = None) -> list[str]:
-        sel = [p for p in self._resolve_paths(paths) if os.path.isfile(p)]
+        sel = [p for p in self._resolve_paths(paths) if self._is_file(p)]
         for p in sel:
             self.fileActivated.emit(p)
         return sel
 
     def reveal_selected(self, paths: list[str] | None = None) -> list[str]:
         """Emit ``revealInExplorerRequested`` for each existing selected path."""
-        sel = [p for p in self._resolve_paths(paths) if os.path.exists(p)]
+        sel = [p for p in self._resolve_paths(paths) if self._exists(p)]
         for p in sel:
             self.revealInExplorerRequested.emit(p)
         return sel
 
     def create_workspace_here(self, folder: str) -> bool:
         """Emit ``createWorkspaceRequested`` for a selected folder path."""
-        if not folder or not os.path.isdir(folder):
+        if not folder or not self._is_dir(folder):
             return False
         self.createWorkspaceRequested.emit(folder)
         return True
@@ -342,27 +421,32 @@ class FileTree(QWidget):
     def delete_selected(self, paths: list[str] | None = None) -> list[str]:
         out = []
         for p in self._resolve_paths(paths):
-            if os.path.isfile(p):
+            if self._is_file(p):
                 if self.delete_file(p):
                     out.append(p)
-            elif os.path.isdir(p):
+            elif self._is_dir(p):
                 if self.delete_folder(p):
                     out.append(p)
         return out
 
     def move_file_to(self, src_path: str, dest_dir: str) -> str | None:
         """Move an existing file into ``dest_dir``; returns the new path."""
-        if not src_path or not os.path.isfile(src_path) or not dest_dir:
+        if not src_path or not self._is_file(src_path) or not dest_dir:
             return None
         src_path = os.path.abspath(src_path)
         dest_dir = os.path.abspath(dest_dir)
         if dest_dir == os.path.dirname(src_path):
             return None
         try:
-            shutil.move(src_path, dest_dir)
+            if self._fs is not None:
+                new_path = os.path.join(dest_dir, os.path.basename(src_path))
+                self._fs.rename(src_path, new_path)
+            else:
+                shutil.move(src_path, dest_dir)
+                new_path = os.path.join(dest_dir, os.path.basename(src_path))
         except OSError:
             return None
-        new_path = os.path.join(dest_dir, os.path.basename(src_path))
+        self._refresh_model()
         self.selectPath(new_path)
         return new_path
 
@@ -371,12 +455,16 @@ class FileTree(QWidget):
         if not path:
             return False
         path = os.path.abspath(path)
-        if not os.path.isfile(path) or path == self._root_path:
+        if not self._is_file(path) or path == self._root_path:
             return False
         try:
-            os.remove(path)
+            if self._fs is not None:
+                self._fs.delete(path)
+            else:
+                os.remove(path)
         except OSError:
             return False
+        self._refresh_model()
         self.pathDeleted.emit(path)
         return True
 
@@ -385,15 +473,19 @@ class FileTree(QWidget):
         if not path:
             return False
         path = os.path.abspath(path)
-        if not os.path.isdir(path):
+        if not self._is_dir(path):
             return False
         root = os.path.abspath(self._root_path) if self._root_path else None
         if root and (path == root or root.startswith(path + os.sep)):
             return False
         try:
-            shutil.rmtree(path)
+            if self._fs is not None:
+                self._fs.delete_dir(path)
+            else:
+                shutil.rmtree(path)
         except OSError:
             return False
+        self._refresh_model()
         self.pathDeleted.emit(path)
         return True
 
@@ -401,15 +493,26 @@ class FileTree(QWidget):
         self._root_path = path
         self.root_label.setText(path)
         self.root_label.setToolTip(path)
-        self._model.setRootPath(path)
-        index = self._model.index(path)
-        self._view.setRootIndex(index)
-        self._view.expand(index)
-        # keep the view showing the root folder itself
-        self._view.setCurrentIndex(index)
+        if self._is_memory and self._fs is not None:
+            self._switch_to_memory_model(path)
+        else:
+            self._model.setRootPath(path)
+            index = self._path_index(self._model, path)
+            self._view.setRootIndex(index)
+            self._view.expand(index)
+            self._view.setCurrentIndex(index)
 
     def currentRoot(self) -> str | None:
         return self._root_path
+
+    def _refresh_model(self) -> None:
+        """Refresh the tree model after filesystem mutations."""
+        if self._is_memory and self._fs is not None:
+            # Rebuild the memory tree model from the updated tree
+            root = self._root_path
+            if root:
+                self._switch_to_memory_model(root)
+        # QFileSystemModel auto-refreshes via its watcher
 
     def set_vault_root(self, path: str) -> None:
         """Show the vault section rooted at ``path`` (unlocked temp dir)."""
@@ -436,7 +539,7 @@ class FileTree(QWidget):
             self.fileActivated.emit(path)
 
     def selectPath(self, path: str) -> None:
-        index = self._model.index(path)
+        index = self._path_index(self._model, path)
         if not index.isValid():
             return
         # expand the ancestor folders (up to the tree root) so the node is visible

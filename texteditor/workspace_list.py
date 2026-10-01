@@ -244,7 +244,7 @@ class WorkspaceList(QWidget):
             menu.addSeparator()
             mixed = self._is_mixed(item)
             if mixed:
-                acts["addfiles"] = menu.addAction("Add files to vault…")
+                acts["addfiles"] = menu.addAction("Encrypt unencrypted files…")
             acts["decrypt"] = menu.addAction("Decrypt…")
         else:
             if root:

@@ -26,9 +26,9 @@ from .file_tree import FileTree
 from .find_bar import FindBar
 from .editor_view import EditorPane
 from .binary_stub import BinaryPane
-from .image_view import ImagePane, image_neighbor
+from .image_view import image_neighbor
 from .todos_pane import TodosPane
-from .binary import classify_file, KIND_TEXT, KIND_IMAGE
+from .panes import make_pane
 from .store import Workspace
 
 
@@ -68,6 +68,7 @@ class WorkspaceView(QWidget):
         super().__init__(parent)
         self.workspace = workspace
         self._theme = theme
+        self._fs = None  # WorkspaceFS for encrypted workspaces
         self._wrap = True
         self._show_ws = False
         self._zoom = 0
@@ -119,6 +120,11 @@ class WorkspaceView(QWidget):
             self.set_root(workspace.root)
 
     # --- root / tree -----------------------------------------------------------
+    def set_fs(self, fs) -> None:
+        """Set the WorkspaceFS for this workspace (encrypted in-memory mode)."""
+        self._fs = fs
+        self.tree.set_fs(fs)
+
     def set_root(self, path: str) -> None:
         path = os.path.abspath(path)
         if self.workspace is not None:
@@ -132,6 +138,8 @@ class WorkspaceView(QWidget):
 
     def load_workspace(self, ws: Workspace) -> None:
         self.workspace = ws
+        fs = getattr(ws, "workspace_fs", None)
+        self.set_fs(fs)
         if ws.root:
             self.set_root(ws.root)
         self.sync_from_data(ws)
@@ -212,7 +220,7 @@ class WorkspaceView(QWidget):
     def _on_group_current_changed(self, group: QTabWidget) -> None:
         self._active_group = group
         pane = group.currentWidget()
-        if pane is not None and isinstance(pane, EditorPane):
+        if pane is not None and hasattr(pane, "undo"):
             self.find_bar.setPane(pane)
         self.activePaneChanged.emit(pane)
 
@@ -235,11 +243,11 @@ class WorkspaceView(QWidget):
     # --- tab management --------------------------------------------------------
     def _add_pane_to(self, group: QTabWidget, pane) -> None:
         pane.modificationChanged.connect(lambda m, p=pane: self._on_pane_modified(p, m))
-        if isinstance(pane, EditorPane):
+        if hasattr(pane, "setWrap"):
             pane.setWrap(self._wrap)
             pane.setShowWhitespace(self._show_ws)
             pane.set_zoom(self._zoom)
-        if isinstance(pane, ImagePane):
+        if hasattr(pane, "navigateRequested"):
             pane.navigateRequested.connect(lambda step, p=pane: self._navigate_image(p, step))
             pane.pathChanged.connect(lambda p=pane: self._update_pane_title(p))
         group.addTab(pane, pane.title)
@@ -251,20 +259,7 @@ class WorkspaceView(QWidget):
         self._add_pane_to(self.active_group(), pane)
 
     def _make_pane_for(self, path: str):
-        if path.lower().endswith(".todo"):
-            pane = TodosPane()
-            if pane.load(path):
-                return pane
-            pane.deleteLater()
-        kind = classify_file(path)
-        if kind == KIND_TEXT:
-            pane = EditorPane(self._theme)
-            pane.loadFile(path)
-        elif kind == KIND_IMAGE:
-            pane = ImagePane(path)
-        else:
-            pane = BinaryPane(path, kind)
-        return pane
+        return make_pane(path, self._theme, fs=self._fs)
 
     def open_file(self, path: str):
         path = os.path.abspath(path)
@@ -662,7 +657,7 @@ class WorkspaceView(QWidget):
 
     def show_find_bar(self) -> None:
         pane = self.active_pane()
-        if isinstance(pane, EditorPane):
+        if hasattr(pane, "undo"):
             self.find_bar.setPane(pane)
             self.find_bar.show()
             self.find_bar.find_edit.setFocus()
@@ -687,7 +682,7 @@ class WorkspaceView(QWidget):
         """Restore a persisted editor zoom offset (applies to text panes)."""
         self._zoom = max(-8, min(16, int(offset)))
         for pane in self.panes():
-            if isinstance(pane, EditorPane):
+            if hasattr(pane, "set_zoom"):
                 pane.set_zoom(self._zoom)
 
     def zoom_offset(self) -> int:
@@ -695,19 +690,19 @@ class WorkspaceView(QWidget):
 
     def _zoom_all(self, method: str) -> None:
         for pane in self.panes():
-            if isinstance(pane, (EditorPane, ImagePane)):
+            if hasattr(pane, method):
                 getattr(pane, method)()
 
     def set_wrap(self, on: bool) -> None:
         self._wrap = on
         for pane in self.panes():
-            if isinstance(pane, EditorPane):
+            if hasattr(pane, "setWrap"):
                 pane.setWrap(on)
 
     def set_show_whitespace(self, on: bool) -> None:
         self._show_ws = on
         for pane in self.panes():
-            if isinstance(pane, EditorPane):
+            if hasattr(pane, "setShowWhitespace"):
                 pane.setShowWhitespace(on)
 
     def toggle_sidebar(self) -> None:

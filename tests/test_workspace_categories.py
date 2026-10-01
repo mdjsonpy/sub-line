@@ -362,10 +362,10 @@ class TestWorkspaceMove:
 
 
 class TestNewWorkspaceInCategory:
-    def _patch_dialog(self, monkeypatch, folder, encrypt=False, password=""):
+    def _patch_dialog(self, monkeypatch, folder, mode="plain", password=""):
         monkeypatch.setattr(
             mw_mod.NewWorkspaceDialog, "get",
-            staticmethod(lambda parent: (folder, encrypt, password)),
+            staticmethod(lambda parent: (folder, mode, password)),
         )
 
     def test_new_workspace_in_category_places_under_category(self, tmp_path, monkeypatch):
@@ -521,11 +521,7 @@ class TestDeleteCategory:
 class TestEncryptedActivation:
     def test_ensure_unlocked_already_unlocked_no_raise(self, tmp_path):
         """Regression: ``_ensure_unlocked`` on an already-unlocked vault must
-        not raise and must point ``ws.root`` at the decrypted temp dir.
-
-        Previously it called ``VaultManager.temp_dir_for(ws_id)``, which does
-        not exist — the per-vault temp dir is exposed as ``Vault.temp_path``.
-        This is the exact line from the reported traceback.
+        not raise and must set ``ws.workspace_fs`` to the in-memory tree.
         """
         import uuid
         from texteditor import crypto
@@ -548,17 +544,16 @@ class TestEncryptedActivation:
             tmp_path, [enc_ws], [LayoutEntry("workspace", ws_id)]
         )
         try:
-            # Isolated vault manager under tmp_path (don't pollute the real
-            # ~/.local/share/subline data dir).
-            mw._vaults = VaultManager(os.fspath(tmp_path) + os.sep + "vaults")
+            # Isolated vault manager (in-memory, no temp dirs).
+            mw._vaults = VaultManager()
             mw._vaults.get(ws_id, vault_file).unlock("pw")
             assert mw._vaults.get(ws_id, vault_file).is_unlocked
 
             # The exact line that raised before the fix:
             ok = mw._ensure_unlocked(enc_ws)
             assert ok is True
-            assert enc_ws.root and os.path.isdir(enc_ws.root)
-            assert os.path.isfile(os.path.join(enc_ws.root, "hello.py"))
+            assert enc_ws.workspace_fs is not None
+            assert enc_ws.workspace_fs.read_text("hello.py") == "print('hi')\n"
         finally:
             mw.close()
 
