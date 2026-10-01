@@ -41,9 +41,10 @@ class EditorPane(QPlainTextEdit):
 
     modificationChanged = Signal(bool)
 
-    def __init__(self, theme: Theme, parent=None) -> None:
+    def __init__(self, theme: Theme, parent=None, fs=None) -> None:
         super().__init__(parent)
         self._theme = theme
+        self._fs = fs
         self.filepath: str | None = None
         self.encoding: str | None = "utf-8"
         self._highlighter: PygmentsHighlighter | None = None
@@ -86,8 +87,11 @@ class EditorPane(QPlainTextEdit):
         pass  # EditorPane is always text
 
     def loadFile(self, path: str) -> None:
-        with open(path, "rb") as fh:
-            raw = fh.read()
+        if self._fs is not None:
+            raw = self._fs.read_bytes(path)
+        else:
+            with open(path, "rb") as fh:
+                raw = fh.read()
         self.encoding = _detect_encoding(raw)
         try:
             text = raw.decode(self.encoding)
@@ -122,8 +126,11 @@ class EditorPane(QPlainTextEdit):
     def _write(self, path: str) -> bool:
         try:
             data = self.toPlainText().encode(self.encoding or "utf-8")
-            with open(path, "wb") as fh:
-                fh.write(data)
+            if self._fs is not None:
+                self._fs.write_bytes(path, data)
+            else:
+                with open(path, "wb") as fh:
+                    fh.write(data)
         except OSError:
             return False
         self.document().setModified(False)

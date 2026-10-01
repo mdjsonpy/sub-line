@@ -291,10 +291,10 @@ class TodosView(QWidget):
 
     changed = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, fs=None) -> None:
         super().__init__(parent)
         self._todos = Todos()
-        self._store = TodosStore()
+        self._store = TodosStore(fs=fs)
         self._selected: str | None = None
 
         outer = QVBoxLayout(self)

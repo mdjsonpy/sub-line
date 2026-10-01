@@ -45,22 +45,29 @@ class ImageCanvas(QWidget):
         self._timer.timeout.connect(self.update)
 
     # --- source loading --------------------------------------------------------
-    def load(self, path: str) -> None:
+    def load(self, path: str, data: bytes | None = None) -> None:
         self.stop()
         self._pixmap = None
         self._movie = None
         self._fallback = False
         self._scale = 1.0
 
-        pm = QPixmap(path)
-        if not pm.isNull():
-            self._pixmap = self._bounded(pm)
-        else:
-            movie = QMovie(path, None, self)
-            if movie.isValid() and movie.frameCount() > 1:
-                self._movie = movie
+        if data is not None:
+            pm = QPixmap()
+            if pm.loadFromData(data):
+                self._pixmap = self._bounded(pm)
             else:
                 self._fallback = True
+        else:
+            pm = QPixmap(path)
+            if not pm.isNull():
+                self._pixmap = self._bounded(pm)
+            else:
+                movie = QMovie(path, None, self)
+                if movie.isValid() and movie.frameCount() > 1:
+                    self._movie = movie
+                else:
+                    self._fallback = True
         self.updateGeometry()
         self.update()
 
@@ -258,17 +265,25 @@ class ImagePane(QWidget):
     pathChanged = Signal()          # emitted when filepath changes (navigation)
     navigateRequested = Signal(int) # Left = -1, Right = +1
 
-    def __init__(self, path: str, parent=None) -> None:
+    def __init__(self, path: str, parent=None, fs=None) -> None:
         super().__init__(parent)
         self.filepath: str | None = path
         self.kind = KIND_IMAGE
+        self._fs = fs
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self.canvas = ImageCanvas(self)
-        self.canvas.load(path)
+        if fs is not None:
+            try:
+                data = fs.read_bytes(path)
+                self.canvas.load(path, data=data)
+            except (OSError, FileNotFoundError):
+                self.canvas.load(path)
+        else:
+            self.canvas.load(path)
 
         self.scroll = _ImageScrollArea(self)
         self.scroll.setWidgetResizable(False)

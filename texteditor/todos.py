@@ -165,11 +165,21 @@ def todos_from_dict(data: dict) -> Todos:
 
 
 class TodosStore:
+    def __init__(self, fs=None) -> None:
+        self._fs = fs
+
     def load(self, path: str) -> Todos:
+        if self._fs is not None:
+            data = self._fs.read_bytes(path)
+            return todos_from_dict(json.loads(data.decode("utf-8")))
         with open(path, "r", encoding="utf-8") as fh:
             return todos_from_dict(json.load(fh))
 
     def save(self, t: Todos, path: str) -> None:
+        if self._fs is not None:
+            data = json.dumps(todos_to_dict(t), indent=2, ensure_ascii=False).encode("utf-8")
+            self._fs.write_bytes(path, data)
+            return
         d = os.path.dirname(os.path.abspath(path))
         os.makedirs(d, exist_ok=True)
         tmp = path + ".tmp"

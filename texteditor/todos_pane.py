@@ -17,10 +17,12 @@ class TodosPane(TodosView):
     management (dirty tracking, save, save-as, clone) works unchanged.
     """
 
+    kind = "todos"
+
     modificationChanged = Signal(bool)
 
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+    def __init__(self, parent=None, fs=None) -> None:
+        super().__init__(parent, fs=fs)
         self.filepath: str | None = None
         self._modified = False
         self._loading = False

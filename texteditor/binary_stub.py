@@ -62,10 +62,11 @@ class BinaryPane(QWidget):
 
     modificationChanged = Signal(bool)
 
-    def __init__(self, path: str, kind: str, parent=None) -> None:
+    def __init__(self, path: str, kind: str, parent=None, fs=None) -> None:
         super().__init__(parent)
         self.filepath: str | None = path
         self.kind = kind
+        self._fs = fs
 
         meta = _KIND_META.get(kind, _KIND_META[KIND_BINARY])
         label, color = meta
@@ -91,9 +92,12 @@ class BinaryPane(QWidget):
         size_label = QLabel(self)
         size_label.setAlignment(Qt.AlignCenter)
         try:
-            st = os.stat(path)
-            size_label.setText(_human_size(st.st_size))
-        except OSError:
+            if fs is not None:
+                size_label.setText(_human_size(fs.size(path)))
+            else:
+                st = os.stat(path)
+                size_label.setText(_human_size(st.st_size))
+        except (OSError, FileNotFoundError):
             size_label.setText("")
         layout.addWidget(size_label)
 

@@ -55,15 +55,19 @@ def _ext_kind(path: str) -> str | None:
     return None
 
 
-def classify_file(path: str) -> str:
+def classify_file(path: str, fs=None) -> str:
     """Return the content kind for a file path."""
     ext_kind = _ext_kind(path)
 
     header = b""
     try:
-        with open(path, "rb") as fh:
-            header = fh.read(64)
-    except OSError:
+        if fs is not None:
+            data = fs.read_bytes(path)
+            header = data[:64]
+        else:
+            with open(path, "rb") as fh:
+                header = fh.read(64)
+    except (OSError, FileNotFoundError):
         header = b""
 
     # Strong magic signatures override the extension.
