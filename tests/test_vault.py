@@ -1,5 +1,5 @@
 """Tests for vault lifecycle: unlock/lock cycles, password changes,
-manager registry, and orphan recovery.
+manager registry — using the in-memory API (no temp dirs).
 """
 from __future__ import annotations
 
@@ -28,137 +28,113 @@ def make_vault_file(tmp_path, ws_id: str, password: str, files: dict) -> str:
     return vault_path
 
 
-def read(path: str) -> str:
-    with open(path) as fh:
-        return fh.read()
-
-
 class TestUnlockLock:
     def test_unlock_lock_cycle(self, tmp_path):
         vault_path = make_vault_file(tmp_path, "ws1", "mypw", {"a.txt": "hello"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
+        v = Vault("ws1", vault_path)
         assert not v.is_unlocked
-        assert v.temp_path is None
+        assert v.tree is None
 
-        temp = v.unlock("mypw")
+        tree = v.unlock("mypw")
         assert v.is_unlocked
-        assert v.temp_path == temp
-        assert read(os.path.join(temp, "a.txt")) == "hello"
+        assert v.tree is tree
+        assert tree.read_bytes("a.txt").decode() == "hello"
 
-        with open(os.path.join(temp, "b.txt"), "w") as fh:
-            fh.write("new file")
+        tree.write_bytes("b.txt", b"new file")
 
         v.lock()
         assert not v.is_unlocked
-        assert v.temp_path is None
-        assert not os.path.exists(temp)
+        assert v.tree is None
 
         # Re-unlock: both original and modified files must be present
-        temp2 = v.unlock("mypw")
-        assert read(os.path.join(temp2, "a.txt")) == "hello"
-        assert read(os.path.join(temp2, "b.txt")) == "new file"
+        tree2 = v.unlock("mypw")
+        assert tree2.read_bytes("a.txt").decode() == "hello"
+        assert tree2.read_bytes("b.txt").decode() == "new file"
         v.lock()
 
     def test_unlock_wrong_password(self, tmp_path):
         vault_path = make_vault_file(tmp_path, "ws1", "correct", {"a.txt": "x"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
+        v = Vault("ws1", vault_path)
         with pytest.raises(VaultError):
             v.unlock("wrong")
         assert not v.is_unlocked
 
     def test_unlock_missing_vault_file(self, tmp_path):
-        v = Vault("ws1", str(tmp_path / "nope.vault"),
-                  base_dir=str(tmp_path / "vaults"))
+        v = Vault("ws1", str(tmp_path / "nope.vault"))
         with pytest.raises(VaultError):
             v.unlock("pw")
         assert not v.is_unlocked
 
-    def test_unlock_replaces_stale_temp_dir(self, tmp_path):
-        vault_path = make_vault_file(tmp_path, "ws1", "pw", {"a.txt": "hello"})
-        base = str(tmp_path / "vaults")
-        stale = os.path.join(base, "ws1")
-        os.makedirs(stale)
-        with open(os.path.join(stale, "stale.txt"), "w") as fh:
-            fh.write("old crash data")
-
-        v = Vault("ws1", vault_path, base_dir=base)
-        temp = v.unlock("pw")
-        assert not os.path.exists(os.path.join(temp, "stale.txt"))
-        assert read(os.path.join(temp, "a.txt")) == "hello"
+    def test_unlock_no_plaintext_on_disk(self, tmp_path):
+        """After unlock, no new plaintext files should be created on disk."""
+        vault_path = make_vault_file(tmp_path, "ws1", "pw", {"a.txt": "secret-data"})
+        # Record all files that exist before unlock
+        before = set()
+        for dirpath, _dirs, files in os.walk(str(tmp_path)):
+            for f in files:
+                before.add(os.path.join(dirpath, f))
+        v = Vault("ws1", vault_path)
+        v.unlock("pw")
+        # No new files should have been created
+        after = set()
+        for dirpath, _dirs, files in os.walk(str(tmp_path)):
+            for f in files:
+                after.add(os.path.join(dirpath, f))
+        new_files = after - before
+        assert not new_files, f"plaintext leaked: {new_files}"
         v.lock()
 
     def test_lock_when_locked_raises(self, tmp_path):
         vault_path = make_vault_file(tmp_path, "ws1", "pw", {"a.txt": "x"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
+        v = Vault("ws1", vault_path)
         with pytest.raises(VaultError):
             v.lock()
-
-    def test_lock_writes_no_plaintext_temp(self, tmp_path):
-        vault_path = make_vault_file(tmp_path, "ws1", "pw", {"a.txt": "secret-data"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
-        temp = v.unlock("pw")
-        v.lock()
-        # No plaintext may remain anywhere under the base dir
-        base = str(tmp_path / "vaults")
-        for dirpath, _dirnames, filenames in os.walk(base):
-            for name in filenames:
-                with open(os.path.join(dirpath, name), "rb") as fh:
-                    assert b"secret-data" not in fh.read()
 
 
 class TestChangePassword:
     def test_change_password_locked(self, tmp_path):
         vault_path = make_vault_file(tmp_path, "ws1", "old", {"a.txt": "x"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
+        v = Vault("ws1", vault_path)
         v.change_password("old", "new")
         with pytest.raises(VaultError):
             v.unlock("old")
-        temp = v.unlock("new")
-        assert read(os.path.join(temp, "a.txt")) == "x"
+        tree = v.unlock("new")
+        assert tree.read_bytes("a.txt").decode() == "x"
         v.lock()
 
     def test_change_password_unlocked_keeps_edits(self, tmp_path):
         vault_path = make_vault_file(tmp_path, "ws1", "old", {"a.txt": "hello"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
-        temp = v.unlock("old")
-        with open(os.path.join(temp, "b.txt"), "w") as fh:
-            fh.write("edited")
+        v = Vault("ws1", vault_path)
+        tree = v.unlock("old")
+        tree.write_bytes("b.txt", b"edited")
         v.change_password("old", "new")
         assert v.is_unlocked  # still unlocked after change
 
         v.lock()
         with pytest.raises(VaultError):
             v.unlock("old")
-        temp2 = v.unlock("new")
-        assert read(os.path.join(temp2, "a.txt")) == "hello"
-        assert read(os.path.join(temp2, "b.txt")) == "edited"
+        tree2 = v.unlock("new")
+        assert tree2.read_bytes("a.txt").decode() == "hello"
+        assert tree2.read_bytes("b.txt").decode() == "edited"
         v.lock()
 
     def test_change_password_wrong_old(self, tmp_path):
         vault_path = make_vault_file(tmp_path, "ws1", "correct", {"a.txt": "x"})
-        v = Vault("ws1", vault_path, base_dir=str(tmp_path / "vaults"))
+        v = Vault("ws1", vault_path)
         with pytest.raises(VaultError):
             v.change_password("wrong", "new")
 
 
-class _FakeWs:
-    def __init__(self, ws_id: str, vault_path: str, encrypted: bool = True):
-        self.id = ws_id
-        self.vault_path = vault_path
-        self.root = vault_path
-        self.encrypted = encrypted
-
-
 class TestManager:
     def test_get_returns_same_instance(self, tmp_path):
-        m = VaultManager(base_dir=str(tmp_path / "vaults"))
+        m = VaultManager()
         p = str(tmp_path / "a.vault")
         assert m.get("ws1", p) is m.get("ws1", p)
 
     def test_lock_all(self, tmp_path):
         v1 = make_vault_file(tmp_path, "ws1", "pw1", {"a.txt": "1"})
         v2 = make_vault_file(tmp_path, "ws2", "pw2", {"b.txt": "2"})
-        m = VaultManager(base_dir=str(tmp_path / "vaults"))
+        m = VaultManager()
         a = m.get("ws1", v1)
         b = m.get("ws2", v2)
         a.unlock("pw1")
@@ -166,53 +142,11 @@ class TestManager:
         m.lock_all()
         assert not a.is_unlocked and not b.is_unlocked
 
-    def test_recover_from_workspaces(self, tmp_path):
-        base = str(tmp_path / "vaults")
-        m = VaultManager(base_dir=base)
-        vault_path = make_vault_file(tmp_path, "ws1", "pw", {"a.txt": "x"})
-        ws = _FakeWs("ws1", vault_path)
-
-        # No temp dir yet: nothing to recover
-        assert m.recover_from_workspaces([ws]) == []
-
-        # Simulate a crash: temp dir on disk, no unlocked vault
-        orphan = os.path.join(base, "ws1")
-        os.makedirs(os.path.join(orphan, "sub"))
-        with open(os.path.join(orphan, "sub", "data.txt"), "w") as fh:
-            fh.write("unsaved")
-        assert m.recover_from_workspaces([ws]) == ["ws1"]
-        # temp dir must be wiped after recovery
-        assert not os.path.isdir(orphan)
-        # vault file still present (re-encrypted with recovery key)
-        assert os.path.isfile(vault_path) and os.path.getsize(vault_path) > 0
-
-    def test_recover_skips_unlocked(self, tmp_path):
-        base = str(tmp_path / "vaults")
-        m = VaultManager(base_dir=base)
-        vault_path = make_vault_file(tmp_path, "ws1", "pw", {"a.txt": "x"})
-        ws = _FakeWs("ws1", vault_path)
-        v = m.get("ws1", vault_path)
-        v.unlock("pw")  # now unlocked, temp dir exists
-        assert os.path.isdir(os.path.join(base, "ws1"))
-        # an unlocked vault is never "orphaned"
-        assert m.recover_from_workspaces([ws]) == []
-        v.lock()
-
-    def test_recover_skips_plain(self, tmp_path):
-        base = str(tmp_path / "vaults")
-        m = VaultManager(base_dir=base)
-        ws_plain = _FakeWs("ws1", str(tmp_path / "plain.vault"), encrypted=False)
-        orphan = os.path.join(base, "ws1")
-        os.makedirs(orphan)
-        assert m.recover_from_workspaces([ws_plain]) == []
-        assert os.path.isdir(orphan)  # left untouched
-
-    def test_discard_orphan(self, tmp_path):
-        base = str(tmp_path / "vaults")
-        m = VaultManager(base_dir=base)
-        orphan = os.path.join(base, "ws9")
-        os.makedirs(orphan)
-        with open(os.path.join(orphan, "f.txt"), "w") as fh:
-            fh.write("junk")
-        m.discard_orphan("ws9")
-        assert not os.path.exists(orphan)
+    def test_discard(self, tmp_path):
+        m = VaultManager()
+        p = str(tmp_path / "a.vault")
+        v = m.get("ws1", p)
+        assert v is m.get("ws1", p)
+        m.discard("ws1")
+        # After discard, a new instance is returned
+        assert m.get("ws1", p) is not v

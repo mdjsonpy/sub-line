@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import json
 import shutil
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -36,6 +36,7 @@ class Workspace:
     split_actives: list = field(default_factory=list)  # active index per group
     encrypted: bool = False  # True => contents live in a .vault file
     vault_path: str | None = None  # persistent .vault file (authoritative when encrypted)
+    workspace_fs: object = field(default=None, repr=False)  # WorkspaceFS for in-memory I/O
 
 
 @dataclass
@@ -119,6 +120,26 @@ def _parse_workspace(raw: dict) -> Workspace | None:
     if not ws.id:
         return None
     return ws
+
+
+def _serialize_workspace(ws: Workspace) -> dict:
+    """JSON-safe representation of a workspace.
+
+    ``workspace_fs`` is a runtime handle (an in-memory tree for encrypted
+    workspaces) and is deliberately excluded — it is rebuilt on unlock, not
+    persisted.
+    """
+    return {
+        "id": ws.id,
+        "name": ws.name,
+        "root": ws.root,
+        "tabs": list(ws.tabs),
+        "active": ws.active,
+        "splits": [list(split) for split in ws.splits],
+        "split_actives": list(ws.split_actives),
+        "encrypted": ws.encrypted,
+        "vault_path": ws.vault_path,
+    }
 
 
 def _parse_workspaces(data: dict) -> list[Workspace]:
@@ -233,7 +254,7 @@ class WorkspacesStore:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         payload = {
             "version": 4,
-            "workspaces": [asdict(ws) for ws in data.workspaces],
+            "workspaces": [_serialize_workspace(ws) for ws in data.workspaces],
             "layout": [{"kind": e.kind, "ref": e.ref} for e in data.layout],
             "collapsed": list(data.collapsed),
             "active_workspace_id": data.active_workspace_id,

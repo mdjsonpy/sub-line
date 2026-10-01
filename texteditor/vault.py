@@ -1,11 +1,9 @@
 """Vault management: unlock/lock encrypted workspaces.
 
 A :class:`Vault` wraps a single ``.vault`` file. While unlocked, the
-workspace contents live in a per-workspace temp directory under the
-manager's base dir (default ``$XDG_DATA_HOME/subline/vaults`` or
-``~/.local/share/subline/vaults``). Locking re-encrypts the current
-contents back into the vault file (atomic write) and securely deletes
-the temp dir.
+workspace contents live **entirely in process RAM** as a :class:`MemoryTree`.
+No decrypted bytes are ever written to disk. Locking re-encrypts the
+in-memory contents back into the vault file (atomic write) and clears RAM.
 
 No Qt imports; pure Python and fully unit-testable.
 """
@@ -14,114 +12,99 @@ from __future__ import annotations
 import os
 
 from . import crypto
+from .workspace_fs import MemoryTree
 
 
 class VaultError(Exception):
     """Raised when a vault operation fails (bad password, missing file, ...)."""
 
 
-def default_base_dir() -> str:
-    """``$XDG_DATA_HOME/subline/vaults`` (or ``~/.local/share/subline/vaults``)."""
-    base = os.environ.get("XDG_DATA_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "share"
-    )
-    return os.path.join(base, "subline", "vaults")
-
-
 class Vault:
-    """Unlock/lock/change-password lifecycle for one encrypted workspace."""
+    """Unlock/lock/change-password lifecycle for one encrypted workspace.
 
-    def __init__(
-        self,
-        workspace_id: str,
-        vault_path: str,
-        base_dir: str | None = None,
-    ) -> None:
+    While unlocked, the decrypted contents are held in :attr:`tree`
+    (a :class:`MemoryTree` in RAM). No temp directory is created.
+    """
+
+    def __init__(self, workspace_id: str, vault_path: str) -> None:
         self._ws_id = workspace_id
         self._vault_path = vault_path
-        self._base_dir = base_dir or default_base_dir()
-        self._temp_path: str | None = None
+        self._tree: MemoryTree | None = None
         self._password: str | None = None
 
     @property
     def is_unlocked(self) -> bool:
-        return self._temp_path is not None
+        return self._tree is not None
 
     @property
-    def temp_path(self) -> str | None:
-        return self._temp_path
+    def tree(self) -> MemoryTree | None:
+        """The in-memory contents (None while locked)."""
+        return self._tree
 
     @property
     def vault_path(self) -> str:
         return self._vault_path
 
-    def _temp_dir(self) -> str:
-        return os.path.join(self._base_dir, self._ws_id)
-
-    def unlock(self, password: str) -> str:
-        """Decrypt the vault into the temp dir and return the dir path.
+    def unlock(self, password: str) -> MemoryTree:
+        """Decrypt the vault into memory and return the :class:`MemoryTree`.
 
         Raises :class:`VaultError` on wrong password, missing vault file,
         or corrupt data.
         """
         if self.is_unlocked:
-            return self._temp_path  # type: ignore[return-value]
+            return self._tree  # type: ignore[return-value]
         try:
             data = self._read_vault()
             tar = crypto.decrypt_vault(data, password)
         except (OSError, crypto.CryptoError) as exc:
             raise VaultError(str(exc)) from exc
-        dest = self._temp_dir()
-        if os.path.isdir(dest):
-            crypto.secure_delete_dir(dest)  # remove stale data from a crash
-        os.makedirs(self._base_dir, exist_ok=True)
         try:
-            crypto.unpack_directory(tar, dest)
+            self._tree = MemoryTree.unpack_from_tar(tar)
         except Exception as exc:
-            if os.path.isdir(dest):
-                crypto.secure_delete_dir(dest)
+            self._tree = None
             raise VaultError(f"failed to unpack vault: {exc}") from exc
         self._password = password
-        self._temp_path = dest
-        return dest
+        return self._tree
 
     def lock(self) -> None:
-        """Re-encrypt the temp dir into the vault file, then securely wipe it.
+        """Re-encrypt the in-memory contents into the vault file, then clear RAM.
 
         Raises :class:`VaultError` if the vault is not unlocked.
         """
-        if not self.is_unlocked or self._password is None:
+        if not self.is_unlocked or self._password is None or self._tree is None:
             raise VaultError("vault is not unlocked")
         try:
-            tar = crypto.pack_directory(self._temp_path)
+            tar = self._tree.pack_to_tar()
             data = crypto.encrypt_vault(tar, self._password)
-        except (OSError, crypto.CryptoError) as exc:
+        except crypto.CryptoError as exc:
             raise VaultError(f"failed to pack/encrypt: {exc}") from exc
         try:
             self._atomic_write(data)
         except OSError as exc:
             raise VaultError(f"failed to write vault file: {exc}") from exc
-        crypto.secure_delete_dir(self._temp_path)
+        self._tree = None
         self._password = None
-        self._temp_path = None
 
     def change_password(self, old_password: str, new_password: str) -> None:
         """Verify ``old_password`` and re-encrypt the vault with ``new_password``.
 
         Works while locked or unlocked. When unlocked, the live (possibly
-        modified) contents are repacked before re-encryption.
+        modified) in-memory contents are repacked before re-encryption.
         """
-        try:
-            data = self._read_vault()
-            tar = crypto.decrypt_vault(data, old_password)  # verifies old pw
-        except (OSError, crypto.CryptoError) as exc:
-            raise VaultError("old password incorrect") from exc
-        if self.is_unlocked:
+        if self.is_unlocked and self._tree is not None:
+            # re-encrypt from live in-memory contents
             try:
-                tar = crypto.pack_directory(self._temp_path)
-            except (OSError, crypto.CryptoError) as exc:
+                tar = self._tree.pack_to_tar()
+            except Exception as exc:
                 raise VaultError(f"failed to pack: {exc}") from exc
             self._password = new_password
+        else:
+            # locked: verify old password by decrypting, then re-encrypt
+            try:
+                data = self._read_vault()
+                tar = crypto.decrypt_vault(data, old_password)
+            except (OSError, crypto.CryptoError) as exc:
+                raise VaultError("old password incorrect") from exc
         try:
             self._atomic_write(crypto.encrypt_vault(tar, new_password))
         except OSError as exc:
@@ -145,21 +128,16 @@ class Vault:
 
 
 class VaultManager:
-    """Registry of :class:`Vault` instances sharing one base dir."""
+    """Registry of :class:`Vault` instances."""
 
-    def __init__(self, base_dir: str | None = None) -> None:
-        self._base_dir = base_dir or default_base_dir()
+    def __init__(self) -> None:
         self._vaults: dict[str, Vault] = {}
-
-    @property
-    def base_dir(self) -> str:
-        return self._base_dir
 
     def get(self, workspace_id: str, vault_path: str) -> Vault:
         """Return the :class:`Vault` for ``workspace_id`` (creating it if new)."""
         v = self._vaults.get(workspace_id)
         if v is None or v.vault_path != vault_path:
-            v = Vault(workspace_id, vault_path, self._base_dir)
+            v = Vault(workspace_id, vault_path)
             self._vaults[workspace_id] = v
         return v
 
@@ -169,49 +147,15 @@ class VaultManager:
             if v.is_unlocked:
                 v.lock()
 
-    def recover_from_workspaces(self, workspaces) -> list[str]:
-        """Re-encrypt any orphaned temp dirs found on disk after a crash.
+    def lock_one(self, workspace_id: str) -> None:
+        """Lock a single vault by workspace id.
 
-        ``workspaces`` is the loaded list of :class:`Workspace`; for each
-        encrypted workspace whose temp dir still exists but has no unlocked
-        vault in the registry, its contents are re-encrypted (with a
-        recovery key) back into the vault file and the temp dir wiped.
-        Returns the ids that were recovered.
+        Raises :class:`KeyError` if the id is not in the registry.
         """
-        recovered = []
-        for ws in workspaces:
-            if not getattr(ws, "encrypted", False):
-                continue
-            ws_id = getattr(ws, "id", "")
-            vault_path = getattr(ws, "vault_path", None) or getattr(ws, "root", None)
-            if not ws_id or not vault_path or not os.path.isfile(vault_path):
-                continue
-            tmp = os.path.join(self._base_dir, ws_id)
-            if not os.path.isdir(tmp):
-                continue
-            v = self._vaults.get(ws_id)
-            if v is not None and v.is_unlocked:
-                continue  # currently unlocked — leave it alone
-            self._recover(tmp, vault_path)
-            recovered.append(ws_id)
-        return recovered
+        v = self._vaults[workspace_id]
+        if v.is_unlocked:
+            v.lock()
 
-    def discard_orphan(self, workspace_id: str) -> None:
-        """Securely delete the orphaned temp dir for ``workspace_id``."""
-        path = os.path.join(self._base_dir, workspace_id)
-        if os.path.isdir(path):
-            crypto.secure_delete_dir(path)
-
-    def _recover(self, tmp_dir: str, vault_path: str) -> None:
-        """Re-encrypt ``tmp_dir`` into ``vault_path`` and securely wipe it."""
-        tar = crypto.pack_directory(tmp_dir)
-        data = crypto.encrypt_vault(tar, "orphan-recovery")
-        parent = os.path.dirname(os.path.abspath(vault_path))
-        os.makedirs(parent, exist_ok=True)
-        tmp = vault_path + ".tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, vault_path)
-        crypto.secure_delete_dir(tmp_dir)
+    def discard(self, workspace_id: str) -> None:
+        """Remove a vault from the registry (in-memory only, nothing on disk)."""
+        self._vaults.pop(workspace_id, None)
