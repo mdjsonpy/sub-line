@@ -23,13 +23,12 @@ from . import APP_DISPLAY_NAME, __version__
 from .theme import Theme
 from .workspace import WorkspaceView
 from .workspace_list import WorkspaceList
-from .editor_view import EditorPane
 from .store import Workspace, WorkspacesStore, LayoutEntry, StoreData
 from .todos_pane import TodosPane
 from . import crypto
 from .vault import VaultManager, VaultError
+from .vault_service import VaultService
 from .new_workspace_dialog import NewWorkspaceDialog
-from .password_dialog import PasswordDialog, ChangePasswordDialog
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +57,17 @@ class MainWindow(QMainWindow):
         self._split.setSizes([200, 900])
         self.setCentralWidget(self._split)
 
+        self._vault_service = VaultService(
+            parent=self,
+            view=self._view,
+            get_vaults=lambda: self._vaults,
+            get_workspaces=lambda: self._workspaces,
+            get_current_index=lambda: self._current_index,
+            index_of=self._index_of,
+            refresh=self._refresh_list,
+            schedule_save=self._schedule_save,
+        )
+
         self._ws_list.activated.connect(self.activate_workspace)
         self._ws_list.closeRequested.connect(self.close_workspace)
         self._ws_list.newRequested.connect(self.new_workspace)
@@ -72,12 +82,12 @@ class MainWindow(QMainWindow):
         self._ws_list.deleteCategoryRequested.connect(self.delete_category)
         self._ws_list.categoryUpRequested.connect(self.move_category_up)
         self._ws_list.categoryDownRequested.connect(self.move_category_down)
-        self._ws_list.unlockRequested.connect(self._on_unlock)
-        self._ws_list.lockRequested.connect(self._on_lock)
-        self._ws_list.changePasswordRequested.connect(self._on_change_password)
-        self._ws_list.encryptRequested.connect(self._on_encrypt)
-        self._ws_list.decryptRequested.connect(self._on_decrypt)
-        self._ws_list.addFilesToVaultRequested.connect(self._on_add_files_to_vault)
+        self._ws_list.unlockRequested.connect(self._vault_service.on_unlock)
+        self._ws_list.lockRequested.connect(self._vault_service.on_lock)
+        self._ws_list.changePasswordRequested.connect(self._vault_service.on_change_password)
+        self._ws_list.encryptRequested.connect(self._vault_service.on_encrypt)
+        self._ws_list.decryptRequested.connect(self._vault_service.on_decrypt)
+        self._ws_list.addFilesToVaultRequested.connect(self._vault_service.on_add_files_to_vault)
         self._ws_list.newWorkspaceInCategoryRequested.connect(self.new_workspace_in_category)
         self._view.tree.toggleWorkspacesRequested.connect(self.toggle_workspaces)
         self._view.tree.revealInExplorerRequested.connect(self.reveal_in_explorer)
@@ -106,9 +116,14 @@ class MainWindow(QMainWindow):
 
     def _build_menus(self) -> None:
         mb = self.menuBar()
+        for builder in (
+            self._build_file_menu, self._build_edit_menu, self._build_markdown_menu,
+            self._build_view_menu, self._build_todos_menu, self._build_help_menu,
+        ):
+            mb.addMenu(builder())
 
-        # ---- File ----
-        file_menu = QMenu("File", self)
+    def _build_file_menu(self) -> QMenu:
+        m = QMenu("File", self)
         self._act("new_file", "New File", self.new_file, "Ctrl+N")
         self._act("open_file", "Open…", self.open_file_dialog, "Ctrl+O")
         self._act("new_ws", "New Workspace…", self.new_workspace)
@@ -117,21 +132,20 @@ class MainWindow(QMainWindow):
         self._act("close_tab", "Close Tab", self.close_tab, "Ctrl+W")
         self._act("close_ws", "Close Workspace", self.close_current_workspace)
         self._act("quit", "Quit", self.close, "Ctrl+Q")
+        m.addAction(self._actions["new_file"])
+        m.addAction(self._actions["open_file"])
+        m.addAction(self._actions["new_ws"])
+        m.addSeparator()
+        m.addAction(self._actions["save"])
+        m.addAction(self._actions["save_all"])
+        m.addAction(self._actions["close_tab"])
+        m.addAction(self._actions["close_ws"])
+        m.addSeparator()
+        m.addAction(self._actions["quit"])
+        return m
 
-        file_menu.addAction(self._actions["new_file"])
-        file_menu.addAction(self._actions["open_file"])
-        file_menu.addAction(self._actions["new_ws"])
-        file_menu.addSeparator()
-        file_menu.addAction(self._actions["save"])
-        file_menu.addAction(self._actions["save_all"])
-        file_menu.addAction(self._actions["close_tab"])
-        file_menu.addAction(self._actions["close_ws"])
-        file_menu.addSeparator()
-        file_menu.addAction(self._actions["quit"])
-        mb.addMenu(file_menu)
-
-        # ---- Edit ----
-        edit_menu = QMenu("Edit", self)
+    def _build_edit_menu(self) -> QMenu:
+        m = QMenu("Edit", self)
         self._act("undo", "Undo", self.undo, "Ctrl+Z")
         self._act("redo", "Redo", self.redo, "Ctrl+Shift+Z")
         self._act("cut", "Cut", self.cut, "Ctrl+X")
@@ -139,29 +153,29 @@ class MainWindow(QMainWindow):
         self._act("paste", "Paste", self.paste, "Ctrl+V")
         self._act("select_all", "Select All", self.select_all, "Ctrl+A")
         self._act("find", "Find", self.show_find, "Ctrl+F")
-        edit_menu.addAction(self._actions["undo"])
-        edit_menu.addAction(self._actions["redo"])
-        edit_menu.addSeparator()
-        edit_menu.addAction(self._actions["cut"])
-        edit_menu.addAction(self._actions["copy"])
-        edit_menu.addAction(self._actions["paste"])
-        edit_menu.addAction(self._actions["select_all"])
-        edit_menu.addSeparator()
-        edit_menu.addAction(self._actions["find"])
-        mb.addMenu(edit_menu)
+        m.addAction(self._actions["undo"])
+        m.addAction(self._actions["redo"])
+        m.addSeparator()
+        m.addAction(self._actions["cut"])
+        m.addAction(self._actions["copy"])
+        m.addAction(self._actions["paste"])
+        m.addAction(self._actions["select_all"])
+        m.addSeparator()
+        m.addAction(self._actions["find"])
+        return m
 
-        # ---- Markdown ----
-        md_menu = QMenu("Markdown", self)
+    def _build_markdown_menu(self) -> QMenu:
+        m = QMenu("Markdown", self)
         self._act("format_table", "Format Table", self.format_table, "Ctrl+Shift+T")
         self._actions["format_table"].setToolTip("Align the table under the cursor into a clean grid")
         self._act("format_all_tables", "Format All Tables", self.format_all_tables, "Ctrl+Shift+A")
         self._actions["format_all_tables"].setToolTip("Align every table in the document")
-        md_menu.addAction(self._actions["format_table"])
-        md_menu.addAction(self._actions["format_all_tables"])
-        mb.addMenu(md_menu)
+        m.addAction(self._actions["format_table"])
+        m.addAction(self._actions["format_all_tables"])
+        return m
 
-        # ---- View ----
-        view_menu = QMenu("View", self)
+    def _build_view_menu(self) -> QMenu:
+        m = QMenu("View", self)
         self._act("wrap", "Toggle Word Wrap", self.toggle_wrap, "Ctrl+Shift+V", checkable=True)
         self._actions["wrap"].setChecked(True)
         self._act("whitespace", "Toggle Whitespace", self.toggle_whitespace, checkable=True)
@@ -173,41 +187,41 @@ class MainWindow(QMainWindow):
         self._act("end_split", "End Split View", self.end_split)
         self._act("sidebar", "Toggle Sidebar", self.toggle_sidebar, "Ctrl+B", checkable=True)
         self._actions["sidebar"].setChecked(True)
-        view_menu.addAction(self._actions["wrap"])
-        view_menu.addAction(self._actions["whitespace"])
-        view_menu.addSeparator()
-        view_menu.addAction(self._actions["zoom_in"])
-        view_menu.addAction(self._actions["zoom_out"])
-        view_menu.addAction(self._actions["zoom_reset"])
-        view_menu.addSeparator()
-        view_menu.addAction(self._actions["next_tab"])
-        view_menu.addAction(self._actions["prev_tab"])
-        view_menu.addAction(self._actions["end_split"])
-        view_menu.addSeparator()
-        view_menu.addAction(self._actions["sidebar"])
-        mb.addMenu(view_menu)
+        m.addAction(self._actions["wrap"])
+        m.addAction(self._actions["whitespace"])
+        m.addSeparator()
+        m.addAction(self._actions["zoom_in"])
+        m.addAction(self._actions["zoom_out"])
+        m.addAction(self._actions["zoom_reset"])
+        m.addSeparator()
+        m.addAction(self._actions["next_tab"])
+        m.addAction(self._actions["prev_tab"])
+        m.addAction(self._actions["end_split"])
+        m.addSeparator()
+        m.addAction(self._actions["sidebar"])
+        return m
 
-        # ---- Todos ----
-        todos_menu = QMenu("Todos", self)
+    def _build_todos_menu(self) -> QMenu:
+        m = QMenu("Todos", self)
         self._act("todos_new", "New Todos…", self.todos_new)
         self._act("todos_load", "Load Todos…", self.todos_load)
         self._act("todos_save", "Save Todos", self.todos_save)
         self._act("todos_save_as", "Save Todos As…", self.todos_save_as)
         self._act("todos_show", "Show Todos", self.toggle_todos, "Ctrl+T", checkable=True)
-        todos_menu.addAction(self._actions["todos_new"])
-        todos_menu.addAction(self._actions["todos_load"])
-        todos_menu.addSeparator()
-        todos_menu.addAction(self._actions["todos_save"])
-        todos_menu.addAction(self._actions["todos_save_as"])
-        todos_menu.addSeparator()
-        todos_menu.addAction(self._actions["todos_show"])
-        mb.addMenu(todos_menu)
+        m.addAction(self._actions["todos_new"])
+        m.addAction(self._actions["todos_load"])
+        m.addSeparator()
+        m.addAction(self._actions["todos_save"])
+        m.addAction(self._actions["todos_save_as"])
+        m.addSeparator()
+        m.addAction(self._actions["todos_show"])
+        return m
 
-        # ---- Help ----
-        help_menu = QMenu("Help", self)
+    def _build_help_menu(self) -> QMenu:
+        m = QMenu("Help", self)
         self._act("about", "About", self._about)
-        help_menu.addAction(self._actions["about"])
-        mb.addMenu(help_menu)
+        m.addAction(self._actions["about"])
+        return m
 
     # --- workspace lifecycle ---------------------------------------------------
     def current_workspace(self) -> Workspace | None:
@@ -298,32 +312,43 @@ class MainWindow(QMainWindow):
         result = NewWorkspaceDialog.get(self)
         if result is None:
             return
-        folder, encrypt, password = result
-        self.new_workspace_from_folder(folder, encrypt=encrypt, password=password)
+        folder, mode, password = result
+        self.new_workspace_from_folder(folder, mode=mode, password=password)
 
-    def new_workspace_from_folder(self, folder: str, encrypt: bool = False, password: str = "") -> str | None:
-        """Create a plain/encrypted workspace rooted at ``folder``.
+    def new_workspace_from_folder(self, folder: str, mode: str = "plain", password: str = "") -> str | None:
+        """Create a workspace rooted at ``folder``.
+
+        ``mode`` is ``"plain"``, ``"encrypt_new"``, or ``"encrypt_existing"``.
 
         Returns the new workspace id on success, or ``None`` if the action was
-        cancelled or failed (e.g. encryption error)."""
+        cancelled or failed."""
         folder = os.path.abspath(folder)
-        if encrypt and not password:
+        if mode in ("encrypt_new", "encrypt_existing") and not password:
             return None
         if self._current_index >= 0:
             if not self._view.confirm_close_all():
                 return None
             self._view.capture_into(self._workspaces[self._current_index])
         ws_id = uuid.uuid4().hex
-        if encrypt:
+        if mode == "encrypt_new":
             ws = Workspace(id=ws_id, name=None, root="", tabs=[], active=0,
                            encrypted=True, vault_path=os.path.join(folder, ".subline.vault"))
             try:
                 crypto.create_encrypted_workspace(folder, password)
-                temp_dir = self._vaults.get(ws_id, ws.vault_path).unlock(password)
-                ws.root = temp_dir
-            except (crypto.CryptoError, VaultError) as exc:
+            except crypto.CryptoError as exc:
                 QMessageBox.warning(self, "Encryption failed", str(exc))
-                self._vaults.discard_orphan(ws_id)
+                self._refresh_list()
+                return None
+            if not self._unlock_with_password(ws, password):
+                self._vaults.discard(ws_id)
+                self._refresh_list()
+                return None
+        elif mode == "encrypt_existing":
+            vault_path = os.path.join(folder, ".subline.vault")
+            ws = Workspace(id=ws_id, name=None, root="", tabs=[], active=0,
+                           encrypted=True, vault_path=vault_path)
+            if not self._unlock_with_password(ws, password):
+                self._vaults.discard(ws_id)
                 self._refresh_list()
                 return None
         else:
@@ -337,277 +362,30 @@ class MainWindow(QMainWindow):
         self._schedule_save()
         return ws_id
 
-    # --- encryption ------------------------------------------------------------
+    # --- encryption (delegates to VaultService) --------------------------------
     def _vault_for(self, ws: Workspace):
-        """Return the workspace's :class:`Vault` (creating the registry entry
-        if needed), or ``None`` if it has no usable vault path."""
-        vault_path = ws.vault_path or ws.root
-        if not vault_path:
-            return None
-        return self._vaults.get(ws.id, vault_path)
+        return self._vault_service.vault_for(ws)
 
     def _ensure_unlocked(self, ws: Workspace) -> bool:
-        """Ensure an encrypted workspace is unlocked; return ``True`` on
-        success. Prompts for the password if locked, or aborts on failure."""
-        vault = self._vault_for(ws)
-        if vault is None:
-            QMessageBox.warning(self, "Missing vault",
-                                "This encrypted workspace has no vault file.")
-            return False
-        # In the mixed state the workspace root stays the plaintext folder;
-        # the unlocked vault contents appear in the tree's separate
-        # "Encrypted" section (see ``_sync_tree_for_workspace``). A purely
-        # encrypted workspace has no plaintext, so its root is the temp dir.
-        folder = os.path.dirname(ws.vault_path) if ws.vault_path else ""
-        mixed = bool(folder) and crypto.folder_has_plaintext(folder)
-        if vault.is_unlocked:
-            ws.root = folder if mixed else vault.temp_path
-            return True
-        password = PasswordDialog.get_password(self, "Unlock workspace", "Password:")
-        if password is None:
-            return False
-        try:
-            temp = vault.unlock(password)
-        except VaultError as exc:
-            QMessageBox.warning(self, "Unlock failed", str(exc))
-            return False
-        ws.root = folder if mixed else temp
-        return True
+        return self._vault_service.ensure_unlocked(ws)
 
-    def _on_unlock(self, ws_id: str) -> None:
-        index = self._index_of(ws_id)
-        if index < 0:
-            return
-        ws = self._workspaces[index]
-        if not ws.encrypted:
-            return
-        if not self._ensure_unlocked(ws):
-            return
-        self._refresh_list()
-        if index == self._current_index:
-            self._view_load(ws)
-        self._schedule_save()
+    def _unlock_with_password(self, ws: Workspace, password: str) -> bool:
+        return self._vault_service.unlock_with_password(ws, password)
 
     def _lock_workspace(self, ws: Workspace) -> bool:
-        vault = self._vault_for(ws)
-        if vault is None:
-            return True
-        try:
-            vault.lock()
-        except VaultError as exc:
-            QMessageBox.warning(self, "Lock failed", str(exc))
-            return False
-        ws.root = ""
-        return True
+        return self._vault_service.lock_workspace(ws)
 
-    def _on_lock(self, ws_id: str) -> None:
-        index = self._index_of(ws_id)
-        if index < 0:
-            return
-        ws = self._workspaces[index]
-        if not ws.encrypted or not self._lock_workspace(ws):
-            return
-        if index == self._current_index:
-            self._view.workspace = ws
-            self._view.close_all_tabs()
-        self._sync_tree_for_workspace(ws)
-        self._refresh_list()
-        self._schedule_save()
-
-    def _on_change_password(self, ws_id: str) -> None:
-        index = self._index_of(ws_id)
-        if index < 0:
-            return
-        ws = self._workspaces[index]
-        if not ws.encrypted:
-            return
-        vault = self._vault_for(ws)
-        if vault is None:
-            return
-        result = ChangePasswordDialog.get(self, "Change workspace password")
-        if result is None:
-            return
-        old, new = result
-        if not new:
-            return
-        try:
-            vault.change_password(old, new)
-        except VaultError as exc:
-            QMessageBox.warning(self, "Change password failed", str(exc))
-            return
-        QMessageBox.information(self, "Password changed",
-                                "The workspace password was updated.")
-
-    # --- encrypt / decrypt / merge ---------------------------------------------
     def _view_load(self, ws: Workspace) -> None:
-        """Load ``ws`` into the editor view and resync the file tree sections."""
-        self._view.load_workspace(ws)
-        self._sync_tree_for_workspace(ws)
+        self._vault_service.view_load(ws)
 
     def _sync_tree_for_workspace(self, ws: Workspace) -> None:
-        """Show/hide the tree's vault section for ``ws``.
-
-        The vault section is visible only for a mixed workspace whose vault
-        is currently unlocked (its contents live in the temp dir)."""
-        if (
-            ws.encrypted
-            and ws.vault_path
-            and crypto.folder_has_plaintext(os.path.dirname(ws.vault_path))
-        ):
-            vault = self._vault_for(ws)
-            if vault is not None and vault.is_unlocked and vault.temp_path:
-                self._view.tree.set_vault_root(vault.temp_path)
-                return
-        self._view.tree.clear_vault_root()
+        self._vault_service.sync_tree(ws)
 
     def _resolve_collision(self, rel_path: str) -> str:
-        """Ask how to resolve a vault/plaintext path conflict.
-
-        Returns ``"overwrite"``, ``"keep_vault"``, ``"keep_both"``, or
-        ``"cancelled"`` (which aborts the merge)."""
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Question)
-        box.setWindowTitle("File conflict")
-        box.setText(f'"{rel_path}" exists in both the vault and the folder.')
-        box.setInformativeText("How do you want to resolve this?")
-        overwrite = box.addButton("Overwrite with plaintext", QMessageBox.AcceptRole)
-        keep_vault = box.addButton("Keep vault version", QMessageBox.RejectRole)
-        keep_both = box.addButton("Keep both (rename)", QMessageBox.ActionRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is overwrite:
-            return "overwrite"
-        if clicked is keep_vault:
-            return "keep_vault"
-        if clicked is keep_both:
-            return "keep_both"
-        return "cancelled"
-
-    def _on_encrypt(self, ws_id: str) -> None:
-        index = self._index_of(ws_id)
-        if index < 0:
-            return
-        ws = self._workspaces[index]
-        if ws.encrypted:
-            return
-        folder = ws.root
-        if not folder or not os.path.isdir(folder):
-            QMessageBox.warning(self, "Encrypt failed",
-                                "This workspace has no folder to encrypt.")
-            return
-        if index == self._current_index:
-            if not self._view.confirm_close_all():
-                return
-            self._view.close_all_tabs()
-        password = PasswordDialog.get_password(self, "Encrypt workspace", "New password:")
-        if not password:
-            return
-        try:
-            vault_path = crypto.create_encrypted_workspace(folder, password)
-        except (crypto.CryptoError, OSError) as exc:
-            QMessageBox.warning(self, "Encrypt failed", str(exc))
-            return
-        ws.encrypted = True
-        ws.vault_path = vault_path
-        ws.root = ""
-        ws.tabs = []
-        ws.active = 0
-        ws.splits = []
-        ws.split_actives = []
-        if index == self._current_index:
-            self._view.workspace = ws
-        self._sync_tree_for_workspace(ws)
-        self._refresh_list()
-        self._schedule_save()
-
-    def _on_decrypt(self, ws_id: str) -> None:
-        index = self._index_of(ws_id)
-        if index < 0:
-            return
-        ws = self._workspaces[index]
-        if not ws.encrypted or not ws.vault_path:
-            return
-        folder = os.path.dirname(ws.vault_path)
-        if not os.path.isdir(folder):
-            QMessageBox.warning(self, "Decrypt failed",
-                                "The workspace folder no longer exists.")
-            return
-        if index == self._current_index:
-            if not self._view.confirm_close_all():
-                return
-        vault = self._vault_for(ws)
-        if vault is not None and vault.is_unlocked and not self._lock_workspace(ws):
-            return
-        if index == self._current_index:
-            self._view.close_all_tabs()
-        password = PasswordDialog.get_password(self, "Decrypt workspace", "Password:")
-        if password is None:
-            return
-        try:
-            crypto.decrypt_workspace_inplace(folder, password)
-        except (crypto.CryptoError, OSError) as exc:
-            QMessageBox.warning(self, "Decrypt failed", str(exc))
-            return
-        ws.encrypted = False
-        ws.vault_path = None
-        ws.root = folder
-        ws.tabs = []
-        ws.active = 0
-        ws.splits = []
-        ws.split_actives = []
-        if index == self._current_index:
-            self._view_load(ws)
-        self._sync_tree_for_workspace(ws)
-        self._refresh_list()
-        self._schedule_save()
-
-    def _on_add_files_to_vault(self, ws_id: str) -> None:
-        index = self._index_of(ws_id)
-        if index < 0:
-            return
-        ws = self._workspaces[index]
-        if not ws.encrypted or not ws.vault_path:
-            return
-        folder = os.path.dirname(ws.vault_path)
-        if not os.path.isdir(folder) or not crypto.folder_has_plaintext(folder):
-            return
-        if index == self._current_index:
-            if not self._view.confirm_close_all():
-                return
-        vault = self._vault_for(ws)
-        if vault is not None and vault.is_unlocked and not self._lock_workspace(ws):
-            return
-        if index == self._current_index:
-            self._view.close_all_tabs()
-        password = PasswordDialog.get_password(self, "Add files to vault", "Vault password:")
-        if password is None:
-            return
-        try:
-            crypto.merge_into_vault(folder, password, self._resolve_collision)
-        except (crypto.CryptoError, OSError) as exc:
-            QMessageBox.warning(self, "Add to vault failed", str(exc))
-            return
-        ws.root = ""
-        ws.tabs = []
-        ws.active = 0
-        ws.splits = []
-        ws.split_actives = []
-        if index == self._current_index:
-            self._view_load(ws)
-        self._sync_tree_for_workspace(ws)
-        self._refresh_list()
-        self._schedule_save()
+        return self._vault_service.resolve_collision(rel_path)
 
     def _recover_vaults(self) -> None:
-        """Re-encrypt temp directories left behind by a crash, then lock all
-        encrypted workspaces (a fresh start begins locked)."""
-        try:
-            self._vaults.recover_from_workspaces(self._workspaces)
-        except VaultError as exc:
-            QMessageBox.warning(self, "Recovery", str(exc))
-        for ws in self._workspaces:
-            if ws.encrypted:
-                ws.root = ""
+        self._vault_service.recover()
 
     def close_workspace(self, ws_id: str) -> None:
         index = self._index_of(ws_id)
@@ -803,8 +581,8 @@ class MainWindow(QMainWindow):
         result = NewWorkspaceDialog.get(self)
         if result is None:
             return
-        folder, encrypt, password = result
-        ws_id = self.new_workspace_from_folder(folder, encrypt=encrypt, password=password)
+        folder, mode, password = result
+        ws_id = self.new_workspace_from_folder(folder, mode=mode, password=password)
         if ws_id is None:
             return
         self._place_workspace_in_category(ws_id, category)
@@ -1048,15 +826,11 @@ class MainWindow(QMainWindow):
         self._schedule_save()
 
     # --- editor actions (delegate to active pane) ------------------------------
-    def _active_pane(self):
-        if self.current_workspace() is None:
-            return None
-        pane = self._view.active_pane()
-        return pane if isinstance(pane, EditorPane) else None
-
     def _delegate(self, method: str) -> None:
-        pane = self._active_pane()
-        if pane is not None:
+        if self.current_workspace() is None:
+            return
+        pane = self._view.active_pane()
+        if pane is not None and hasattr(pane, method):
             getattr(pane, method)()
 
     def undo(self): self._delegate("undo")
