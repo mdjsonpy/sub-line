@@ -24,6 +24,7 @@ class TextEditorApp:
     def __init__(self) -> None:
         self.app = QApplication(sys.argv)
         self.app.setApplicationName(APP_DISPLAY_NAME)
+        self.app.setDesktopFileName("texteditor")
         self.theme = Theme()
         self.app.setStyleSheet(self.theme.stylesheet())
         self.store = WorkspacesStore()
@@ -37,6 +38,13 @@ class TextEditorApp:
         return self.app.exec()
 
 
+def _set_proc_name(name: str) -> None:
+    import ctypes, ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    libc.prctl(15, ctypes.c_char_p(name.encode()), 0, 0, 0)
+
+
 def main() -> int:
+    _set_proc_name("texteditor")
     app = TextEditorApp()
     return app.run()
