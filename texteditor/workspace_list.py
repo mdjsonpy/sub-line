@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QTreeWidget,
     QTreeWidgetItem,
-    QPushButton,
     QMenu,
     QApplication,
 )
@@ -77,11 +76,6 @@ class WorkspaceList(QWidget):
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.tree)
-
-        self.new_btn = QPushButton("New Workspace", self)
-        self.new_btn.setStyleSheet("margin: 6px;")
-        self.new_btn.clicked.connect(self.newRequested.emit)
-        layout.addWidget(self.new_btn)
 
     # --- item helpers ----------------------------------------------------------
     @staticmethod
