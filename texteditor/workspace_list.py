@@ -206,9 +206,13 @@ class WorkspaceList(QWidget):
 
     def _empty_menu(self) -> None:
         menu = QMenu(self)
+        act_new = menu.addAction("New Workspace")
+        menu.addSeparator()
         act_new_cat = menu.addAction("New Category…")
         chosen = menu.exec(QCursor.pos())
-        if chosen is act_new_cat:
+        if chosen is act_new:
+            self.newRequested.emit()
+        elif chosen is act_new_cat:
             self.newCategoryRequested.emit()
 
     def _is_mixed(self, item: QTreeWidgetItem) -> bool:
