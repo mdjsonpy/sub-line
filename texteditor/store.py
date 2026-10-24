@@ -48,6 +48,7 @@ class LayoutEntry:
 DEFAULT_SETTINGS: dict = {
     "wrap": True,
     "show_whitespace": False,
+    "show_hidden": False,
     "zoom": 0,
     "sidebar": True,
 }
@@ -177,6 +178,8 @@ def _parse_settings(raw) -> dict:
             out["wrap"] = raw["wrap"]
         if isinstance(raw.get("show_whitespace"), bool):
             out["show_whitespace"] = raw["show_whitespace"]
+        if isinstance(raw.get("show_hidden"), bool):
+            out["show_hidden"] = raw["show_hidden"]
         if isinstance(raw.get("zoom"), (int, float)) and not isinstance(raw.get("zoom"), bool):
             out["zoom"] = int(raw["zoom"])
         if isinstance(raw.get("sidebar"), bool):

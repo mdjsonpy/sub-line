@@ -196,6 +196,7 @@ class MainWindow(QMainWindow):
         self._act("wrap", "Toggle Word Wrap", self.toggle_wrap, "Ctrl+Shift+V", checkable=True)
         self._actions["wrap"].setChecked(True)
         self._act("whitespace", "Toggle Whitespace", self.toggle_whitespace, checkable=True)
+        self._act("hidden", "Show Hidden Files", self.toggle_hidden, checkable=True)
         self._act("zoom_in", "Zoom In", self.zoom_in, "Ctrl+=")
         self._act("zoom_out", "Zoom Out", self.zoom_out, "Ctrl+-")
         self._act("zoom_reset", "Reset Zoom", self.zoom_reset, "Ctrl+0")
@@ -206,6 +207,7 @@ class MainWindow(QMainWindow):
         self._actions["sidebar"].setChecked(True)
         m.addAction(self._actions["wrap"])
         m.addAction(self._actions["whitespace"])
+        m.addAction(self._actions["hidden"])
         m.addSeparator()
         m.addAction(self._actions["zoom_in"])
         m.addAction(self._actions["zoom_out"])
@@ -276,6 +278,8 @@ class MainWindow(QMainWindow):
         self._view.set_wrap(bool(data.settings["wrap"]))
         self._actions["whitespace"].setChecked(bool(data.settings["show_whitespace"]))
         self._view.set_show_whitespace(bool(data.settings["show_whitespace"]))
+        self._actions["hidden"].setChecked(bool(data.settings.get("show_hidden", False)))
+        self._view.tree.set_show_hidden(bool(data.settings.get("show_hidden", False)))
         self._view.set_zoom(int(data.settings["zoom"]))
         self._actions["sidebar"].setChecked(bool(data.settings["sidebar"]))
         self._view.tree.setVisible(bool(data.settings["sidebar"]))
@@ -922,6 +926,10 @@ class MainWindow(QMainWindow):
         self._view.set_show_whitespace(on)
         self._schedule_save()
 
+    def toggle_hidden(self, on: bool) -> None:
+        self._view.tree.set_show_hidden(on)
+        self._schedule_save()
+
     def zoom_in(self) -> None:
         if self.current_workspace() is None:
             return
@@ -953,6 +961,7 @@ class MainWindow(QMainWindow):
         return {
             "wrap": self._actions["wrap"].isChecked(),
             "show_whitespace": self._actions["whitespace"].isChecked(),
+            "show_hidden": self._actions["hidden"].isChecked(),
             "zoom": self._view.zoom_offset(),
             "sidebar": self._view.tree.isVisible(),
         }

@@ -558,6 +558,18 @@ class FileTree(QWidget):
             self._view.expand(index)
             self._view.setCurrentIndex(index)
 
+    def set_show_hidden(self, on: bool) -> None:
+        """Toggle visibility of dotfiles in the tree."""
+        if on:
+            self._fs_model.setFilter(QDir.Files | QDir.Dirs | QDir.Hidden)
+        else:
+            self._fs_model.setFilter(QDir.Files | QDir.Dirs | QDir.NoDotAndDotDot)
+        self._proxy.setSourceModel(self._fs_model)
+        if self._root_path:
+            index = self._path_index(self._root_path)
+            self._view.setRootIndex(index)
+            self._view.expand(index)
+
     def currentRoot(self) -> str | None:
         return self._root_path
 
