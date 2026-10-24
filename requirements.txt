@@ -2,3 +2,6 @@ PySide6>=6.6
 Pygments>=2.17
 chardet>=5.0
 cryptography>=42.0
+
+# test
+pytest>=8.0
