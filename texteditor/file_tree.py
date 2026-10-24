@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QApplication,
+    QLineEdit,
+    QSortFilterProxyModel,
 )
 from PySide6.QtGui import QCursor
 from PySide6.QtCore import Signal, QDir, Qt, QModelIndex
@@ -61,13 +63,27 @@ class FileTree(QWidget):
         self.root_label.setToolTip("")
         layout.addWidget(self.root_label)
 
+        self.search_box = QLineEdit(self)
+        self.search_box.setPlaceholderText("Filter files…")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setStyleSheet(
+            "padding: 3px 6px; margin: 2px 6px 4px 6px; font-size: 12px;"
+        )
+        layout.addWidget(self.search_box)
+
         self._model = QFileSystemModel(self)
         self._model.setFilter(QDir.Files | QDir.Dirs | QDir.NoDotAndDotDot)
         self._model.setRootPath("")
         self._fs_model = self._model  # persistent QFileSystemModel (restored when leaving memory mode)
 
+        self._proxy = QSortFilterProxyModel(self)
+        self._proxy.setSourceModel(self._model)
+        self._proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self._proxy.setFilterKeyColumn(0)
+        self.search_box.textChanged.connect(self._proxy.setFilterFixedString)
+
         self._view = QTreeView(self)
-        self._view.setModel(self._model)
+        self._view.setModel(self._proxy)
         self._view.setAnimated(True)
         self._view.setUniformRowHeights(True)
         self._view.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -143,15 +159,20 @@ class FileTree(QWidget):
             return self._fs.exists(path)
         return os.path.exists(path)
 
-    def _path_index(self, model, path: str) -> QModelIndex:
-        """Get a QModelIndex from an absolute path, works for both model types."""
-        if hasattr(model, "index_by_path"):
-            return model.index_by_path(path)
-        return model.index(path)
+    def _path_index(self, path: str) -> QModelIndex:
+        """Get a proxy QModelIndex from an absolute path, works for both model types."""
+        if hasattr(self._model, "index_by_path"):
+            src = self._model.index_by_path(path)
+        else:
+            src = self._model.index(path)
+        if not src.isValid():
+            return self._proxy.index(0, 0)
+        return self._proxy.mapFromSource(src)
 
-    def _model_path(self, model, index) -> str:
-        """Get the absolute path for an index, works for both model types."""
-        return model.filePath(index)
+    def _model_path(self, index) -> str:
+        """Get the absolute path for a (proxy) index from the view."""
+        src = self._proxy.mapToSource(index)
+        return self._model.filePath(src)
 
     def set_fs(self, fs) -> None:
         """Set the WorkspaceFS. Swap to MemoryTreeModel for memory workspaces,
@@ -167,7 +188,7 @@ class FileTree(QWidget):
         """Restore the QFileSystemModel as the active model (non-encrypted workspace)."""
         if self._model is self._fs_model:
             return
-        self._view.setModel(self._fs_model)
+        self._proxy.setSourceModel(self._fs_model)
         self._view.setHeaderHidden(True)
         root_idx = self._fs_model.index("")
         for col in range(1, self._fs_model.columnCount(root_idx)):
@@ -178,7 +199,7 @@ class FileTree(QWidget):
         """Replace the QFileSystemModel with a MemoryTreeModel."""
         tree = self._fs.tree
         model = MemoryTreeModel(tree, root, self)
-        self._view.setModel(model)
+        self._proxy.setSourceModel(model)
         self._view.setHeaderHidden(True)
         vroot = model.index(0, 0)
         for col in range(1, model.columnCount(vroot)):
@@ -192,7 +213,7 @@ class FileTree(QWidget):
 
     # --- activation / selection --------------------------------------------------
     def _on_activated(self, index) -> None:
-        path = self._model_path(self._model, index)
+        path = self._model_path(index)
         if path and self._is_file(path):
             self.fileActivated.emit(path)
 
@@ -202,7 +223,7 @@ class FileTree(QWidget):
             return []
         out = []
         for idx in sm.selectedRows(0):
-            p = self._model_path(self._model, idx)
+            p = self._model_path(idx)
             if p:
                 out.append(p)
         return out
@@ -212,7 +233,7 @@ class FileTree(QWidget):
         sel = self.selected_paths()
         if not sel:
             idx = self._view.indexAt(pos)
-            p = self._model_path(self._model, idx) if idx.isValid() else ""
+            p = self._model_path(idx) if idx.isValid() else ""
             sel = [p] if p else []
         return sel
 
@@ -532,7 +553,7 @@ class FileTree(QWidget):
             self._switch_to_memory_model(path)
         else:
             self._model.setRootPath(path)
-            index = self._path_index(self._model, path)
+            index = self._path_index(path)
             self._view.setRootIndex(index)
             self._view.expand(index)
             self._view.setCurrentIndex(index)
@@ -574,7 +595,7 @@ class FileTree(QWidget):
             self.fileActivated.emit(path)
 
     def selectPath(self, path: str) -> None:
-        index = self._path_index(self._model, path)
+        index = self._path_index(path)
         if not index.isValid():
             return
         # expand the ancestor folders (up to the tree root) so the node is visible
