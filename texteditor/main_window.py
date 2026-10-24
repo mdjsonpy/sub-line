@@ -15,9 +15,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QMenu,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QPushButton,
 )
-from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt, QTimer, QSize
 
 from . import APP_DISPLAY_NAME, __version__
 from .theme import Theme
@@ -29,6 +33,12 @@ from . import crypto
 from .vault import VaultManager, VaultError
 from .vault_service import VaultService
 from .new_workspace_dialog import NewWorkspaceDialog
+
+
+def _panel_icon(name: str) -> QIcon:
+    """Load a panel icon from the package ``icons/`` directory."""
+    path = os.path.join(os.path.dirname(__file__), "icons", name + ".svg")
+    return QIcon(path)
 
 
 class MainWindow(QMainWindow):
@@ -55,7 +65,14 @@ class MainWindow(QMainWindow):
         self._split.addWidget(self._view)
         self._split.setChildrenCollapsible(False)
         self._split.setSizes([200, 900])
-        self.setCentralWidget(self._split)
+
+        central = QWidget()
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_activity_bar())
+        root.addWidget(self._split)
+        self.setCentralWidget(central)
 
         self._vault_service = VaultService(
             parent=self,
@@ -262,6 +279,7 @@ class MainWindow(QMainWindow):
         self._view.set_zoom(int(data.settings["zoom"]))
         self._actions["sidebar"].setChecked(bool(data.settings["sidebar"]))
         self._view.tree.setVisible(bool(data.settings["sidebar"]))
+        self._act_tree.setChecked(bool(data.settings["sidebar"]))
 
         # restore the selected workspace (fall back to the first in the layout)
         index = self._index_of(data.active_workspace_id) if data.active_workspace_id else -1
@@ -625,8 +643,52 @@ class MainWindow(QMainWindow):
         self._refresh_list()
         self._schedule_save()
 
+    def _build_activity_bar(self) -> QWidget:
+        """Vertical activity bar with toggle buttons for the two side panels."""
+        bar = QWidget()
+        bar.setFixedWidth(44)
+        bar.setStyleSheet(
+            "QWidget { background: #212121; }"
+            "QPushButton { border: none; border-left: 2px solid transparent; "
+            "background: transparent; }"
+            "QPushButton:hover { background: #2a2a2a; }"
+            "QPushButton:checked { background: #2a2a2a; border-left: 2px solid #094771; }"
+        )
+        box = QVBoxLayout(bar)
+        box.setContentsMargins(0, 8, 0, 8)
+        box.setSpacing(4)
+
+        self._act_workspaces = self._activity_button("Workspaces", "workspaces")
+        self._act_tree = self._activity_button("Tree", "tree")
+        box.addWidget(self._act_workspaces)
+        box.addWidget(self._act_tree)
+        box.addStretch(1)
+
+        # The window is not shown yet, so use isHidden() for the intended state.
+        self._act_workspaces.setChecked(not self._ws_list.isHidden())
+        self._act_tree.setChecked(not self._view.tree.isHidden())
+        self._act_workspaces.clicked.connect(self.toggle_workspaces)
+        self._act_tree.clicked.connect(self._toggle_tree_from_bar)
+        return bar
+
+    def _activity_button(self, label: str, icon_name: str) -> QPushButton:
+        btn = QPushButton()
+        btn.setIcon(_panel_icon(icon_name))
+        btn.setIconSize(QSize(24, 24))
+        btn.setFixedSize(36, 36)
+        btn.setCheckable(True)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip(f"Show or hide the {label} panel")
+        btn.setAccessibleName(label)
+        return btn
+
+    def _toggle_tree_from_bar(self) -> None:
+        self.toggle_sidebar(not self._view.tree.isVisible())
+
     def toggle_workspaces(self) -> None:
-        self._ws_list.setVisible(not self._ws_list.isVisible())
+        visible = not self._ws_list.isVisible()
+        self._ws_list.setVisible(visible)
+        self._act_workspaces.setChecked(visible)
 
     # --- todos -------------------------------------------------------------------
     def _todos_panes(self) -> list:
@@ -880,6 +942,7 @@ class MainWindow(QMainWindow):
 
     def toggle_sidebar(self, checked: bool) -> None:
         self._view.tree.setVisible(checked)
+        self._act_tree.setChecked(checked)
         self._schedule_save()
 
     # --- persistence -----------------------------------------------------------
