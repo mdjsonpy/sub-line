@@ -252,11 +252,15 @@ class FileTree(QWidget):
             menu.addSeparator()
             act_open_left = menu.addAction("Open in the Left")
             act_open_right = menu.addAction("Open at the Right")
+        act_rename = None
         act_move = None
-        if files:
-            menu.addSeparator()
-            act_move = menu.addAction("Move To…")
         act_delete = None
+        if sel:
+            menu.addSeparator()
+            act_rename = menu.addAction("Rename…")
+            act_rename.setEnabled(len(sel) == 1)
+        if files:
+            act_move = menu.addAction("Move To…")
         if sel:
             menu.addSeparator()
             act_delete = menu.addAction("Delete…")
@@ -290,6 +294,8 @@ class FileTree(QWidget):
         elif chosen is act_open_right:
             for p in files:
                 self.openInGroupRequested.emit(p, "right")
+        elif chosen is act_rename:
+            self.rename_selected(sel)
         elif chosen is act_move:
             dest = QFileDialog.getExistingDirectory(self, "Move to folder", os.path.dirname(files[0]))
             if dest:
@@ -444,6 +450,35 @@ class FileTree(QWidget):
             else:
                 shutil.move(src_path, dest_dir)
                 new_path = os.path.join(dest_dir, os.path.basename(src_path))
+        except OSError:
+            return None
+        self._refresh_model()
+        self.selectPath(new_path)
+        return new_path
+
+    def rename_selected(self, paths: list[str]) -> str | None:
+        """Rename a single selected file or folder. Returns the new path on success."""
+        if len(paths) != 1:
+            return None
+        old_path = os.path.abspath(paths[0])
+        if old_path == self._root_path:
+            return None
+        old_name = os.path.basename(old_path)
+        new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=old_name)
+        if not ok:
+            return None
+        new_name = new_name.strip()
+        if not new_name or new_name == old_name:
+            return None
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        if self._exists(new_path):
+            QMessageBox.warning(self, "Rename", "A file or folder with that name already exists.")
+            return None
+        try:
+            if self._fs is not None:
+                self._fs.rename(old_path, new_path)
+            else:
+                os.rename(old_path, new_path)
         except OSError:
             return None
         self._refresh_model()
