@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         m = QMenu("File", self)
         self._act("new_file", "New File", self.new_file, "Ctrl+N")
         self._act("open_file", "Open…", self.open_file_dialog, "Ctrl+O")
+        self._act("quick_open", "Quick Open…", self.quick_open, "Ctrl+P")
         self._act("new_ws", "New Workspace…", self.new_workspace)
         self._act("save", "Save", self.save, "Ctrl+S")
         self._act("save_all", "Save All", self.save_all, "Ctrl+Shift+S")
@@ -151,6 +152,7 @@ class MainWindow(QMainWindow):
         self._act("quit", "Quit", self.close, "Ctrl+Q")
         m.addAction(self._actions["new_file"])
         m.addAction(self._actions["open_file"])
+        m.addAction(self._actions["quick_open"])
         m.addAction(self._actions["new_ws"])
         m.addSeparator()
         m.addAction(self._actions["save"])
@@ -855,6 +857,21 @@ class MainWindow(QMainWindow):
         if path:
             self._view.open_file(path)
             self._schedule_save()
+
+    def quick_open(self) -> None:
+        if self.current_workspace() is None:
+            return
+        root = self._view.current_root()
+        if not root or not os.path.isdir(root):
+            return
+        from .quick_open import QuickOpenDialog
+        dlg = QuickOpenDialog(root, self)
+        dlg.fileSelected.connect(self._on_quick_open_selected)
+        dlg.exec()
+
+    def _on_quick_open_selected(self, path: str) -> None:
+        self._view.open_file(path)
+        self._schedule_save()
 
     def close_tab(self) -> None:
         if self.current_workspace() is None:

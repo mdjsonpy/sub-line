@@ -27,10 +27,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QApplication,
     QLineEdit,
-    QSortFilterProxyModel,
 )
 from PySide6.QtGui import QCursor
-from PySide6.QtCore import Signal, QDir, Qt, QModelIndex
+from PySide6.QtCore import Signal, QDir, Qt, QModelIndex, QSortFilterProxyModel
 
 from .todos import Todos, TodosStore
 from .memory_tree_model import MemoryTreeModel
@@ -166,7 +165,7 @@ class FileTree(QWidget):
         else:
             src = self._model.index(path)
         if not src.isValid():
-            return self._proxy.index(0, 0)
+            return QModelIndex()
         return self._proxy.mapFromSource(src)
 
     def _model_path(self, index) -> str:

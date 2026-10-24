@@ -152,8 +152,10 @@ class TestSelectPathExpands:
             fh.write("x")
 
         ft.setRoot(root)
-        a_idx = ft._model.index(os.path.join(root, "a"))
-        b_idx = ft._model.index(sub)
+        a_src = ft._model.index(os.path.join(root, "a"))
+        b_src = ft._model.index(sub)
+        a_idx = ft._proxy.mapFromSource(a_src)
+        b_idx = ft._proxy.mapFromSource(b_src)
         ft._view.collapse(a_idx)
         ft._view.collapse(b_idx)
         assert not ft._view.isExpanded(a_idx)
@@ -172,7 +174,8 @@ class TestSelectPathExpands:
         assert ft._view.isExpanded(b_idx)
         cur = ft._view.currentIndex()
         assert cur.isValid()
-        assert os.path.normcase(os.path.normpath(ft._model.filePath(cur))) == \
+        cur_src = ft._proxy.mapToSource(cur)
+        assert os.path.normcase(os.path.normpath(ft._model.filePath(cur_src))) == \
             os.path.normcase(os.path.normpath(f))
 
     def test_select_path_of_missing_file_is_noop(self, tmp_path):
