@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QVBoxLayout,
     QPushButton,
+    QDialog,
 )
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtCore import Qt, QTimer, QSize
@@ -106,7 +107,6 @@ class MainWindow(QMainWindow):
         self._ws_list.decryptRequested.connect(self._vault_service.on_decrypt)
         self._ws_list.addFilesToVaultRequested.connect(self._vault_service.on_add_files_to_vault)
         self._ws_list.newWorkspaceInCategoryRequested.connect(self.new_workspace_in_category)
-        self._view.tree.toggleWorkspacesRequested.connect(self.toggle_workspaces)
         self._view.tree.revealInExplorerRequested.connect(self.reveal_in_explorer)
         self._view.tree.createWorkspaceRequested.connect(self.new_workspace_from_folder)
         self._view.tabsChanged.connect(self._schedule_save)
@@ -172,6 +172,7 @@ class MainWindow(QMainWindow):
         self._act("paste", "Paste", self.paste, "Ctrl+V")
         self._act("select_all", "Select All", self.select_all, "Ctrl+A")
         self._act("find", "Find", self.show_find, "Ctrl+F")
+        self._act("goto_line", "Go to Line…", self.goto_line, "Ctrl+G")
         m.addAction(self._actions["undo"])
         m.addAction(self._actions["redo"])
         m.addSeparator()
@@ -181,6 +182,7 @@ class MainWindow(QMainWindow):
         m.addAction(self._actions["select_all"])
         m.addSeparator()
         m.addAction(self._actions["find"])
+        m.addAction(self._actions["goto_line"])
         return m
 
     def _build_markdown_menu(self) -> QMenu:
@@ -240,7 +242,10 @@ class MainWindow(QMainWindow):
 
     def _build_help_menu(self) -> QMenu:
         m = QMenu("Help", self)
+        self._act("shortcuts", "Keyboard Shortcuts…", self.show_shortcuts, "F1")
         self._act("about", "About", self._about)
+        m.addAction(self._actions["shortcuts"])
+        m.addSeparator()
         m.addAction(self._actions["about"])
         return m
 
@@ -872,6 +877,21 @@ class MainWindow(QMainWindow):
     def _on_quick_open_selected(self, path: str) -> None:
         self._view.open_file(path)
         self._schedule_save()
+
+    def goto_line(self) -> None:
+        pane = self._view.active_pane()
+        if pane is None or not hasattr(pane, "document"):
+            return
+        from .goto_line import GotoLineDialog
+        total = pane.document().blockCount()
+        dlg = GotoLineDialog(total, self)
+        if dlg.exec() == QDialog.Accepted:
+            dlg.go(pane)
+
+    def show_shortcuts(self) -> None:
+        from .shortcuts_help import ShortcutsDialog
+        dlg = ShortcutsDialog(self)
+        dlg.exec()
 
     def close_tab(self) -> None:
         if self.current_workspace() is None:
