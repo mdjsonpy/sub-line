@@ -27,9 +27,10 @@ from .find_bar import FindBar
 from .editor_view import EditorPane
 from .binary_stub import BinaryPane
 from .image_view import image_neighbor
-from .binary import KIND_AUDIO, KIND_VIDEO
+from .binary import KIND_AUDIO, KIND_VIDEO, KIND_TEXT, classify_file
 from .todos_pane import TodosPane
 from .panes import make_pane
+from .large_file import confirm_open
 from .store import Workspace
 from .status_bar import StatusBar
 
@@ -307,6 +308,11 @@ class WorkspaceView(QWidget):
             if group is not None:
                 group.setCurrentWidget(existing)
             return existing
+
+        # Guard: don't load very large text files into the editor without asking.
+        kind = classify_file(path, fs=self._fs)
+        if kind == KIND_TEXT and not confirm_open(path, self._fs, parent=self):
+            return None
 
         pane = self._make_pane_for(path)
         self._add_pane(pane)
