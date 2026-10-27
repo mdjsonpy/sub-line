@@ -1,11 +1,12 @@
 """Single dispatch point: file path -> the correct pane instance."""
 from __future__ import annotations
 
-from .binary import classify_file, KIND_AUDIO, KIND_IMAGE, KIND_TEXT, KIND_VIDEO
+from .binary import classify_file, KIND_AUDIO, KIND_IMAGE, KIND_PDF, KIND_TEXT, KIND_VIDEO
 from .editor_view import EditorPane
 from .image_view import ImagePane
 from .binary_stub import BinaryPane
 from .todos_pane import TodosPane
+from .pdf_view import PdfPane
 from .theme import Theme
 
 try:
@@ -29,6 +30,8 @@ def make_pane(path: str, theme: Theme, fs=None):
         pane.loadFile(path)
     elif kind == KIND_IMAGE:
         pane = ImagePane(path, fs=fs)
+    elif kind == KIND_PDF:
+        pane = PdfPane(path, fs=fs)
     elif kind == KIND_VIDEO and _HAS_MEDIA:
         pane = VideoPane(path, fs=fs)
     elif kind == KIND_AUDIO and _HAS_MEDIA:

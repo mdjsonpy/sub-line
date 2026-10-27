@@ -223,6 +223,10 @@ class FileTree(QWidget):
         self._file_clipboard: list[str] = []
         self._file_clipboard_cut: bool = False
 
+        # Current tree sort (column + order); used to check the active option.
+        self._sort_col = 0
+        self._sort_order = Qt.AscendingOrder
+
         # Keyboard shortcuts active while the tree has focus. Copy/Cut/Paste are
         # routed from the main window (they collide with the editor's actions);
         # these are the additional file-explorer bindings.
@@ -461,6 +465,76 @@ class FileTree(QWidget):
             return self._fs.exists(path)
         return os.path.exists(path)
 
+    # --- Properties (size popup) -------------------------------------------------
+    @staticmethod
+    def human_size(n: int) -> str:
+        """Human-readable size (``1023`` -> ``1023 B``, ``2048`` -> ``2.0 KB``)."""
+        units = ("B", "KB", "MB", "GB", "TB", "PB")
+        f = float(max(0, int(n)))
+        i = 0
+        while f >= 1024 and i < len(units) - 1:
+            f /= 1024
+            i += 1
+        if i == 0:
+            return f"{int(n)} B"
+        return f"{f:.1f} {units[i]}"
+
+    def file_size(self, path: str) -> int:
+        """Size in bytes of ``path``; for folders, the sum of all files inside."""
+        if self._is_file(path):
+            if self._fs is not None:
+                return int(self._fs.size(path))
+            return os.path.getsize(path)
+        total = 0
+        if self._fs is not None:
+            def walk(rel: str) -> None:
+                nonlocal total
+                try:
+                    entries = self._fs.listdir(rel)
+                except OSError:
+                    return
+                for name in entries:
+                    child = os.path.join(rel, name)
+                    if self._fs.isdir(child):
+                        walk(child)
+                    else:
+                        total += self._fs.size(child)
+            walk(path)
+            return total
+        for dirpath, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    pass
+        return total
+
+    def properties_text(self, paths: list[str]) -> str:
+        """Multi-line properties summary for one or more paths (no UI, testable)."""
+        blocks = []
+        for p in paths:
+            is_dir = self._is_dir(p)
+            blocks.append(
+                f"{os.path.basename(p) or p}\n"
+                f"{'Folder' if is_dir else 'File'}\n"
+                f"Size: {self.human_size(self.file_size(p))}\n"
+                f"Location: {os.path.dirname(p) or p}"
+            )
+        return "\n\n".join(blocks)
+
+    def show_properties(self, paths: list[str]) -> None:
+        """Show the properties dialog for the selected path(s)."""
+        if not paths:
+            return
+        QMessageBox.information(self, "Properties", self.properties_text(paths))
+
+    # --- Sort -------------------------------------------------------------------
+    def sort_by(self, col: int, order: int) -> None:
+        """Sort the tree by ``col`` (0 name, 1 size, 2 modified, 3 type), ``order``."""
+        self._sort_col = col
+        self._sort_order = order
+        self._proxy.sort(col, order)
+
     def _path_index(self, path: str) -> QModelIndex:
         """Get a proxy QModelIndex from an absolute path, works for both model types."""
         if hasattr(self._model, "index_by_path"):
@@ -594,7 +668,32 @@ class FileTree(QWidget):
             menu.addSeparator()
             acts["delete"] = menu.addAction("Delete…")
 
-        ctx = {"sel": sel, "target": target, "files": files, "folder": folder, "acts": acts}
+        # Properties (real, non-encrypted files only — sizes come from the disk).
+        if not self._is_memory:
+            if sel:
+                menu.addSeparator()
+            acts["properties"] = menu.addAction("Properties…")
+            acts["properties"].setEnabled(bool(sel))
+
+        # Sort by (always available; only Name for the single-column memory tree).
+        sort_cols = (
+            [(0, "Name")] if self._is_memory
+            else [(0, "Name"), (1, "Size"), (2, "Modified"), (3, "Type")]
+        )
+        sort_acts: list = []
+        sort_menu = menu.addMenu("Sort by")
+        for col, label in sort_cols:
+            for order, glyph in ((Qt.AscendingOrder, "A→Z"), (Qt.DescendingOrder, "Z→A")):
+                a = sort_menu.addAction(f"{label}  {glyph}")
+                a.setData((col, order))
+                if col == self._sort_col and order == self._sort_order:
+                    a.setChecked(True)
+                sort_acts.append(a)
+
+        ctx = {
+            "sel": sel, "target": target, "files": files, "folder": folder,
+            "acts": acts, "sort_acts": sort_acts,
+        }
         return menu, ctx
 
     def _on_context_menu(self, pos) -> None:
@@ -667,6 +766,11 @@ class FileTree(QWidget):
                 deleted = self.delete_selected(sel)
                 if len(deleted) < n:
                     QMessageBox.warning(self, "Delete", "Some items could not be deleted.")
+        elif chosen is acts.get("properties"):
+            self.show_properties(sel)
+        elif chosen in ctx.get("sort_acts", []):
+            col, order = chosen.data()
+            self.sort_by(col, order)
 
     # --- filesystem actions -----------------------------------------------------
     def new_file_in(self, dir_path: str, name: str) -> str | None:

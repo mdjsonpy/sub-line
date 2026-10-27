@@ -12,11 +12,13 @@ KIND_IMAGE = "image"
 KIND_VIDEO = "video"
 KIND_AUDIO = "audio"
 KIND_BINARY = "binary"
+KIND_PDF = "pdf"
 
 _IMAGE_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp",
     ".tiff", ".tif", ".ico", ".heic", ".heif", ".raw",
 }
+_PDF_EXTS = {".pdf"}
 _VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
     ".m4v", ".mpg", ".mpeg", ".3gp",
@@ -33,7 +35,7 @@ _MAGIC = [
     (b"GIF8", KIND_IMAGE),
     (b"BM", KIND_IMAGE),
     (b"RIFF", None),  # RIFF container: check for WEBP/WAV further in
-    (b"%PDF", KIND_BINARY),
+    (b"%PDF", KIND_PDF),
     (b"ID3", KIND_AUDIO),
     (b"\xff\xfb", KIND_AUDIO),  # MPEG audio frame
     (b"\xff\xf3", KIND_AUDIO),
@@ -52,6 +54,8 @@ def _ext_kind(path: str) -> str | None:
         return KIND_VIDEO
     if ext in _AUDIO_EXTS:
         return KIND_AUDIO
+    if ext in _PDF_EXTS:
+        return KIND_PDF
     return None
 
 
