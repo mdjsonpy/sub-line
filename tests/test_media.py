@@ -151,6 +151,45 @@ class TestMediaPanes:
         assert pane.eventFilter(pane._seek, ev) is True
         assert got == [1]
 
+    def test_audio_helper_prefers_attached_output(self, tmp_path):
+        qapp()
+        p = tmp_path / "x.mp3"
+        p.write_bytes(b"a")
+        pane = AudioPane(str(p))
+        fake = object()
+        pane._audio_output = fake
+        assert pane._audio() is fake
+        pane._audio_output = None
+        assert pane._audio() is pane._player.audioOutput()
+
+    def test_mute_volume_reach_audio_output(self, tmp_path):
+        qapp()
+        p = tmp_path / "x.mp3"
+        p.write_bytes(b"a")
+        pane = AudioPane(str(p))
+
+        calls = []
+        fake = type("AO", (), {})()
+        fake.setMuted = lambda on: calls.append(("muted", on))
+        fake.setVolume = lambda v: calls.append(("volume", v))
+        pane._audio_output = fake
+
+        pane._on_mute(True)
+        pane._on_mute(False)
+        pane._on_volume(42)
+        assert ("muted", True) in calls
+        assert ("muted", False) in calls
+        assert ("volume", 42 / 100) in calls
+
+    def test_controls_noop_without_audio_device(self, tmp_path):
+        qapp()
+        p = tmp_path / "x.mp4"
+        p.write_bytes(b"v")
+        pane = VideoPane(str(p))
+        # must not raise even when no audio output exists
+        pane._on_mute(True)
+        pane._on_volume(50)
+
     def test_make_pane_routes_video(self, tmp_path):
         qapp()
         p = tmp_path / "x.mp4"

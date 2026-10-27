@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 from PySide6.QtCore import Qt, Signal, QUrl, QEvent
-from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 
 from .binary import is_audio, is_video
 
@@ -90,9 +90,17 @@ class BaseMediaPane(QWidget):
         self.filepath: str | None = None
 
         self._player = QMediaPlayer(self)
-        ao = self._player.audioOutput()
-        if ao is not None:
-            ao.setVolume(1.0)
+        # Qt 6.11's FFmpeg backend does not expose audioOutput() until the
+        # backend attaches one internally (which never happens in some
+        # builds), leaving mute/volume as no-ops. Attach an explicit
+        # QAudioOutput when the player has none, guarded so machines without
+        # an audio device keep playing video normally.
+        self._audio_output = self._player.audioOutput()
+        if self._audio_output is None:
+            dev = QMediaDevices.defaultAudioOutput()
+            if not dev.isNull():
+                self._audio_output = QAudioOutput(dev, self)
+                self._player.setAudioOutput(self._audio_output)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -196,13 +204,19 @@ class BaseMediaPane(QWidget):
         self._seeking = False
         self._player.setPosition(self._seek.value())
 
+    def _audio(self):
+        """The QAudioOutput in use (attached one, or the player's)."""
+        if self._audio_output is not None:
+            return self._audio_output
+        return self._player.audioOutput()
+
     def _on_mute(self, on: bool) -> None:
-        ao = self._player.audioOutput()
+        ao = self._audio()
         if ao is not None:
             ao.setMuted(on)
 
     def _on_volume(self, v: int) -> None:
-        ao = self._player.audioOutput()
+        ao = self._audio()
         if ao is not None:
             ao.setVolume(v / 100)
             if v > 0 and self._mute_btn.isChecked():
