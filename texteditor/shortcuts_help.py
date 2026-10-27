@@ -38,6 +38,7 @@ SHORTCUTS = [
     ("Ctrl + /", "Toggle comment"),
     ("Ctrl + L", "Select current line"),
     ("Alt + Up/Down", "Move line up/down"),
+    ("Left / Right", "Previous / next file in folder (image, video, audio)"),
 ]
 
 

@@ -1,8 +1,9 @@
 # Sub-line
 
-A file explorer, text editor, and image viewer for Linux, built with Python
-and PySide6. Organize your work into multiple workspaces, split your view,
-preview images, manage todos — and keep sensitive projects inside an
+A mixture of file explorer, text editor, image viewer, and multimedia
+player for Linux, built with Python and PySide6. Organize your work into
+multiple workspaces, split your view, browse images, watch videos, listen
+to audio, manage todos — and keep sensitive projects inside an
 **AES-256-GCM encrypted vault**.
 
 ## Features
@@ -30,6 +31,10 @@ preview images, manage todos — and keep sensitive projects inside an
     with per-collision choices: overwrite, keep vault version, or keep both.
 - **Image preview** — zoom, animated GIFs, and arrow-key navigation between
   neighboring images.
+- **Video playback** — play/pause, seek, mute and volume, with arrow-key
+  navigation between neighboring videos in the same folder.
+- **Audio playback** — the same transport controls for music and sound
+  files, with arrow-key navigation between neighboring audio files.
 - **Todos board** — a kanban-style pane backed by `.todo` files.
 - **Markdown tables** — format the table under the cursor or all tables in the
   buffer.
@@ -40,7 +45,8 @@ preview images, manage todos — and keep sensitive projects inside an
 
 - Python 3.10+
 - Dependencies (see `requirements.txt`):
-  - `PySide6` — GUI toolkit
+  - `PySide6` — GUI toolkit (including QtMultimedia, which powers the
+    video/audio players)
   - `Pygments` — syntax highlighting
   - `chardet` — encoding detection
   - `cryptography` — AES-GCM vault encryption
@@ -113,9 +119,12 @@ texteditor/             # the application package
   workspace.py          # WorkspaceView: tree, tabs, split, panes
   pane.py / panes.py    # pane protocol + factory (path -> pane)
   vault_service.py      # encryption orchestration (UI-agnostic)
-  editor_view.py        # text pane + syntax highlighting
-  image_view.py         # image preview pane
-  binary_stub.py        # placeholder for video/audio/binary
+   editor_view.py        # text pane + syntax highlighting
+   image_view.py         # image preview pane
+   media.py              # shared media transport + folder navigation
+   video_view.py         # video playback pane
+   audio_view.py         # audio playback pane
+   binary_stub.py        # placeholder for binary files
   todos_pane.py, todos_view.py, todos.py   # todos board
   file_tree.py          # folder sidebar
   find_bar.py           # find & replace

@@ -311,6 +311,69 @@ check("classify heic as image", classify_file(heic) == "image")
 heic_pane = ImagePane(heic)
 check("heic pane is fallback", heic_pane.isFallback())
 
+# --- 5d. video / audio playback panes ---
+from texteditor.binary import is_video, is_audio
+check("is_video extension check", is_video("a.mp4") and not is_video("a.mp3"))
+check("is_audio extension check", is_audio("a.mp3") and not is_audio("a.mp4"))
+
+mp4_a = os.path.join(d, "a.mp4"); open(mp4_a, "wb").write(b"fake mp4")
+mp4_b = os.path.join(d, "b.mp4"); open(mp4_b, "wb").write(b"fake mp4")
+mp3_a = os.path.join(d, "a.mp3"); open(mp3_a, "wb").write(b"fake mp3")
+mp3_b = os.path.join(d, "b.mp3"); open(mp3_b, "wb").write(b"fake mp3")
+
+from texteditor.media import video_neighbor, audio_neighbor, media_neighbor
+_n = video_neighbor(mp4_a, 1)
+check("video neighbor +1 of a = b",
+      _n is not None and os.path.basename(_n) == "b.mp4")
+_n = video_neighbor(mp4_b, 1)
+check("video neighbor wraps b -> a",
+      _n is not None and os.path.basename(_n) == "a.mp4")
+_n = audio_neighbor(mp3_b, -1)
+check("audio neighbor -1 of b = a",
+      _n is not None and os.path.basename(_n) == "a.mp3")
+_n = media_neighbor(mp3_a, 1)
+check("media neighbor dispatches by kind (skips images in folder)",
+      _n is not None and os.path.basename(_n) == "b.mp3")
+
+try:
+    from texteditor.video_view import VideoPane
+    from texteditor.audio_view import AudioPane
+
+    vpane = VideoPane(mp4_a)
+    check("video pane title", vpane.title == "a.mp4")
+    check("video pane not modified", vpane.isModified() is False)
+    check("video pane save no-op", vpane.save() is False)
+    vpane.set_path(mp4_b)
+    check("video pane set_path swaps the file",
+          vpane.filepath == os.path.abspath(mp4_b))
+
+    _nav = []
+    vpane.navigateRequested.connect(lambda s: _nav.append(s))
+    vpane.keyPressEvent(_QKE(_QEV.KeyPress, _Qt.Key_Right, _Qt.NoModifier))
+    check("video Right arrow emits navigateRequested(+1)", 1 in _nav)
+
+    apane = AudioPane(mp3_a)
+    check("audio pane title", apane.title == "a.mp3")
+    check("audio pane not modified", apane.isModified() is False)
+
+    # workspace routes video/audio to the players (not the placeholder stub)
+    wsv3 = WorkspaceView(Workspace(id="wmedia", name="W", root=d, tabs=[], active=0), theme)
+    pane_v = wsv3.open_file(mp4_a)
+    check("workspace opens mp4 as VideoPane", isinstance(pane_v, VideoPane))
+    check("workspace video tab is not BinaryPane", not isinstance(pane_v, BinaryPane))
+    pane_a = wsv3.open_file(mp3_a)
+    check("workspace opens mp3 as AudioPane", isinstance(pane_a, AudioPane))
+
+    # arrow navigation through the workspace (same wiring as images)
+    wsv3._navigate_media(pane_v, 1)
+    check("workspace navigates the video pane to its neighbor",
+          pane_v.filepath == os.path.abspath(mp4_b))
+    wsv3._navigate_media(pane_a, 1)
+    check("workspace navigates the audio pane to its neighbor",
+          pane_a.filepath == os.path.abspath(mp3_b))
+except ImportError:
+    print("SKIP  QtMultimedia unavailable - video/audio panes not tested")
+
 # --- 6. MainWindow boots (no saved workspaces) ---
 mstore = WorkspacesStore(os.path.join(tmpdir, "ws2.json"))
 mw = MainWindow(theme, mstore)

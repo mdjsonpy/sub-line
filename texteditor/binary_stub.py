@@ -1,7 +1,8 @@
-"""Placeholder pane shown for image / video / audio / unknown binary files.
+"""Placeholder pane shown for unknown binary files.
 
-Media rendering is a planned future feature; for now this gives a clear,
-styled "coming soon" view so binary files don't corrupt the text editor.
+Images open in the image viewer and video/audio in their players; anything
+else (PDFs, executables, archives, ...) gets a clear, styled "binary" view
+so non-text files don't corrupt the text editor.
 """
 from __future__ import annotations
 
@@ -108,10 +109,17 @@ class BinaryPane(QWidget):
             KIND_BINARY: "binary",
         }.get(kind, "file")
 
-        note = QLabel(
-            f"This is a {kind_name} file.\nPreview support is coming in a future version.",
-            self,
-        )
+        if kind in (KIND_VIDEO, KIND_AUDIO):
+            note_text = (
+                f"This is a {kind_name} file.\n"
+                "Playback is unavailable on this machine (QtMultimedia is missing)."
+            )
+        else:
+            note_text = (
+                f"This is a {kind_name} file.\n"
+                "Preview support is coming in a future version."
+            )
+        note = QLabel(note_text, self)
         note.setAlignment(Qt.AlignCenter)
         note.setStyleSheet("color: #8a8a8a;")
         layout.addWidget(note)

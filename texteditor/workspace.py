@@ -27,10 +27,16 @@ from .find_bar import FindBar
 from .editor_view import EditorPane
 from .binary_stub import BinaryPane
 from .image_view import image_neighbor
+from .binary import KIND_AUDIO, KIND_VIDEO
 from .todos_pane import TodosPane
 from .panes import make_pane
 from .store import Workspace
 from .status_bar import StatusBar
+
+try:
+    from .media import media_neighbor
+except ImportError:  # QtMultimedia not available on this machine
+    media_neighbor = None
 
 
 class _MiddleClickCloseTabBar(QTabBar):
@@ -280,7 +286,7 @@ class WorkspaceView(QWidget):
             pane.setShowWhitespace(self._show_ws)
             pane.set_zoom(self._zoom)
         if hasattr(pane, "navigateRequested"):
-            pane.navigateRequested.connect(lambda step, p=pane: self._navigate_image(p, step))
+            pane.navigateRequested.connect(lambda step, p=pane: self._navigate_media(p, step))
             pane.pathChanged.connect(lambda p=pane: self._update_pane_title(p))
         group.addTab(pane, pane.title)
         group.setCurrentWidget(pane)
@@ -499,11 +505,16 @@ class WorkspaceView(QWidget):
         self._remove_group(right)
         self.tabsChanged.emit()
 
-    # --- image navigation ------------------------------------------------------
-    def _navigate_image(self, pane, step) -> None:
+    # --- media navigation ------------------------------------------------------
+    def _navigate_media(self, pane, step) -> None:
+        """Move a media pane to the previous/next file of the same kind."""
         if not getattr(pane, "filepath", None):
             return
-        neighbor = image_neighbor(pane.filepath, step)
+        kind = getattr(pane, "kind", None)
+        if kind in (KIND_VIDEO, KIND_AUDIO) and media_neighbor is not None:
+            neighbor = media_neighbor(pane.filepath, step)
+        else:
+            neighbor = image_neighbor(pane.filepath, step)
         if neighbor:
             pane.set_path(neighbor)
 

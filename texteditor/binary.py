@@ -1,7 +1,7 @@
 """Classify files as text / image / video / audio / binary.
 
-Used to decide whether a file opens in the text editor pane or in a
-placeholder stub view (media rendering is a planned future feature).
+Used to decide which pane a file opens in: the text editor, the image
+viewer, the video/audio players, or the binary placeholder stub.
 """
 from __future__ import annotations
 
@@ -108,3 +108,13 @@ def is_media(kind: str) -> bool:
 def is_image(path: str) -> bool:
     """Cheap extension-only image check (no file reads; safe for folder listing)."""
     return os.path.splitext(path)[1].lower() in _IMAGE_EXTS
+
+
+def is_video(path: str) -> bool:
+    """Cheap extension-only video check (no file reads; safe for folder listing)."""
+    return os.path.splitext(path)[1].lower() in _VIDEO_EXTS
+
+
+def is_audio(path: str) -> bool:
+    """Cheap extension-only audio check (no file reads; safe for folder listing)."""
+    return os.path.splitext(path)[1].lower() in _AUDIO_EXTS
