@@ -18,9 +18,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QWidget,
     QVBoxLayout,
-    QHBoxLayout,
     QLabel,
-    QPushButton,
     QMenu,
     QInputDialog,
     QFileDialog,
@@ -28,16 +26,103 @@ from PySide6.QtWidgets import (
     QApplication,
     QLineEdit,
 )
-from PySide6.QtGui import QCursor
-from PySide6.QtCore import Signal, QDir, Qt, QModelIndex, QSortFilterProxyModel
+from PySide6.QtGui import QCursor, QShortcut, QKeySequence
+from PySide6.QtCore import Signal, QDir, Qt, QModelIndex, QSortFilterProxyModel, QUrl, QMimeData
 
 from .todos import Todos, TodosStore
 from .memory_tree_model import MemoryTreeModel
 
 
+class _FileExplorerView(QTreeView):
+    """Tree view with drag-and-drop support for files and folders.
+
+    Drag one or more rows and drop them onto a folder row (or the empty area,
+    which targets the workspace root) to move them there. Hold **Ctrl** while
+    dropping to copy instead of move. This view only translates the gesture
+    into a list of paths plus a destination folder; the filesystem work is
+    delegated to the parent :class:`FileTree` (:meth:`FileTree.drop_files`).
+    """
+
+    def __init__(self, tree, parent=None) -> None:
+        super().__init__(parent)
+        self._tree = tree
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+
+    # -- drag source --------------------------------------------------------
+    def mimeTypes(self):
+        return ["text/uri-list"]
+
+    def mimeData(self, indexes):
+        paths = [self._tree._model_path(i) for i in indexes]
+        paths = [os.path.abspath(p) for p in paths if p]
+        if not paths:
+            return None
+        lines = [QUrl.fromLocalFile(p).toString() for p in paths]
+        mime = QMimeData()
+        mime.setData("text/uri-list", "\n".join(lines).encode("utf-8"))
+        return mime
+
+    # -- drop target --------------------------------------------------------
+    def _drop_point(self, event):
+        try:
+            return event.position().toPoint()
+        except AttributeError:
+            return event.pos()
+
+    def _drop_paths(self, mime) -> list[str]:
+        if mime is None or not mime.hasFormat("text/uri-list"):
+            return []
+        data = bytes(mime.data("text/uri-list")).decode("utf-8", "replace")
+        out = []
+        for line in data.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("http://", "https://")):
+                continue
+            if line.startswith("file://"):
+                out.append(QUrl(line).toLocalFile())
+            else:
+                out.append(line)
+        return [p for p in out if p]
+
+    def _drop_target(self, event):
+        idx = self.indexAt(self._drop_point(event))
+        if idx.isValid():
+            p = self._tree._model_path(idx)
+            if p:
+                return p if self._tree._is_dir(p) else os.path.dirname(p)
+        return self._tree.currentRoot()
+
+    def dragEnterEvent(self, event) -> None:
+        if self._drop_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._drop_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        paths = self._drop_paths(event.mimeData())
+        target = self._drop_target(event)
+        if not paths or not target:
+            event.ignore()
+            return
+        copy = (event.action() == Qt.CopyAction) or bool(event.modifiers() & Qt.ControlModifier)
+        if self._tree.drop_files(paths, target, copy):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
 class FileTree(QWidget):
     fileActivated = Signal(str)
-    toggleWorkspacesRequested = Signal()
     pathDeleted = Signal(str)
     revealInExplorerRequested = Signal(str)
     openInGroupRequested = Signal(str, str)   # (path, "left"|"right")
@@ -81,7 +166,7 @@ class FileTree(QWidget):
         self._proxy.setFilterKeyColumn(0)
         self.search_box.textChanged.connect(self._proxy.setFilterFixedString)
 
-        self._view = QTreeView(self)
+        self._view = _FileExplorerView(self, self)
         self._view.setModel(self._proxy)
         self._view.setAnimated(True)
         self._view.setUniformRowHeights(True)
@@ -131,16 +216,234 @@ class FileTree(QWidget):
         layout.addWidget(self._vault_label)
         layout.addWidget(self._vault_view)
 
-        bottom = QWidget(self)
-        bl = QHBoxLayout(bottom)
-        bl.setContentsMargins(8, 6, 8, 6)
-        self.workspaces_btn = QPushButton("Workspaces", bottom)
-        self.workspaces_btn.setToolTip("Show or hide the workspaces list")
-        bl.addWidget(self.workspaces_btn)
-        self.workspaces_btn.clicked.connect(self.toggleWorkspacesRequested.emit)
-        layout.addWidget(bottom)
-
         self._root_path: str | None = None
+
+        # Internal clipboard for file copy/cut/paste (independent of the system
+        # text clipboard, which is used for "Copy Absolute Path").
+        self._file_clipboard: list[str] = []
+        self._file_clipboard_cut: bool = False
+
+        # Keyboard shortcuts active while the tree has focus. Copy/Cut/Paste are
+        # routed from the main window (they collide with the editor's actions);
+        # these are the additional file-explorer bindings.
+        sc = (
+            (QKeySequence.Delete, self.delete_files, "Delete the selected item(s)"),
+            (QKeySequence("F2"), self.rename_file, "Rename the selected item"),
+            (QKeySequence("Ctrl+Shift+N"), self.new_folder_here, "New folder in the selected location"),
+        )
+        self._shortcuts = []
+        for key, slot, tip in sc:
+            s = QShortcut(key, self._view)
+            s.setContext(Qt.WidgetWithChildrenShortcut)
+            s.activated.connect(slot)
+            self._shortcuts.append(s)
+
+    def has_tree_focus(self) -> bool:
+        """True when keyboard focus is on the (writable) explorer tree view."""
+        w = QApplication.focusWidget()
+        if w is None:
+            return False
+        node = w
+        while node is not None:
+            if node is self._view:
+                return True
+            node = node.parentWidget()
+        return False
+
+    # --- file clipboard (copy / cut / paste) ----------------------------------
+    def copy_files(self) -> bool:
+        """Copy the selected files/folders to the internal clipboard."""
+        sel = [p for p in self.selected_paths() if self._exists(p)]
+        if not sel:
+            return False
+        self._file_clipboard = [os.path.abspath(p) for p in sel]
+        self._file_clipboard_cut = False
+        return True
+
+    def cut_files(self) -> bool:
+        """Cut the selected files/folders to the internal clipboard."""
+        sel = [p for p in self.selected_paths() if self._exists(p)]
+        if not sel:
+            return False
+        self._file_clipboard = [os.path.abspath(p) for p in sel]
+        self._file_clipboard_cut = True
+        return True
+
+    def paste_files(self) -> bool:
+        """Paste the internal clipboard into the selected folder (or the root)."""
+        if not self._file_clipboard:
+            return False
+        sel = self.selected_paths()
+        dir_sel = [p for p in sel if self._is_dir(p)]
+        if dir_sel:
+            target = os.path.abspath(dir_sel[0])
+        elif sel:
+            target = os.path.dirname(os.path.abspath(sel[0]))
+        else:
+            target = os.path.abspath(self._root_path) if self._root_path else None
+        if not target or not self._is_dir(target):
+            return False
+        ok = False
+        for src in list(self._file_clipboard):
+            if self._exists(src) and self._paste_one(src, target):
+                ok = True
+        if self._file_clipboard_cut:
+            self._file_clipboard = []
+            self._file_clipboard_cut = False
+        return ok
+
+    def drop_files(self, paths: list[str], target_dir: str, copy: bool) -> bool:
+        """Move or copy each of *paths* into *target_dir* (drag-and-drop).
+
+        Returns True if at least one item was moved or copied.
+        """
+        target_dir = os.path.abspath(target_dir)
+        if not self._is_dir(target_dir):
+            return False
+        moved = False
+        for src in paths:
+            if not src:
+                continue
+            if self._drop_one(os.path.abspath(src), target_dir, copy):
+                moved = True
+        return moved
+
+    def _drop_one(self, src: str, target_dir: str, copy: bool) -> bool:
+        if not self._exists(src) or not self._is_dir(target_dir):
+            return False
+        if src == target_dir:
+            return False
+        if self._is_dir(src) and target_dir.startswith(src + os.sep):
+            return False
+        if os.path.dirname(src) == target_dir:
+            return False
+        base = os.path.basename(src.rstrip(os.sep))
+        if not base:
+            return False
+        dest = self._unique_dest(os.path.join(target_dir, base))
+        try:
+            if self._is_dir(src):
+                if copy:
+                    self._copy_dir(src, dest)
+                else:
+                    self._move_dir(src, dest)
+            else:
+                if copy:
+                    self._copy_file(src, dest)
+                else:
+                    self._move_file(src, dest)
+        except OSError:
+            return False
+        self._refresh_model()
+        self.selectPath(dest)
+        return True
+
+    def delete_files(self) -> None:
+        """Delete the selected files/folders (with confirmation)."""
+        sel = [p for p in self.selected_paths() if self._exists(p)]
+        if not sel:
+            return
+        n = len(sel)
+        ret = QMessageBox.question(
+            self, "Delete",
+            f"Delete {n} item(s)?\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes:
+            return
+        deleted = self.delete_selected(sel)
+        if len(deleted) < n:
+            QMessageBox.warning(self, "Delete", "Some items could not be deleted.")
+
+    def rename_file(self) -> None:
+        """Rename the single selected item."""
+        sel = [p for p in self.selected_paths() if self._exists(p)]
+        if len(sel) == 1:
+            self.rename_selected(sel)
+
+    def new_folder_here(self) -> None:
+        sel = self.selected_paths()
+        target = self._new_target(sel) if sel else self._root_path
+        if not target or not self._is_dir(target):
+            return
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="new folder")
+        if ok:
+            self.new_folder_in(target, name)
+
+    def select_all_files(self) -> None:
+        """Select every visible row in the explorer tree."""
+        self._view.selectAll()
+        self._view.setFocus()
+
+    def _paste_one(self, src: str, target_dir: str) -> bool:
+        src = os.path.abspath(src)
+        target_dir = os.path.abspath(target_dir)
+        if src == target_dir:
+            return False
+        # Never paste a folder into itself or one of its subfolders.
+        if self._is_dir(src) and target_dir.startswith(src + os.sep):
+            return False
+        base = os.path.basename(src.rstrip(os.sep))
+        if not base:
+            return False
+        dest = self._unique_dest(os.path.join(target_dir, base))
+        try:
+            if self._is_dir(src):
+                if self._file_clipboard_cut:
+                    self._move_dir(src, dest)
+                else:
+                    self._copy_dir(src, dest)
+            else:
+                if self._file_clipboard_cut:
+                    self._move_file(src, dest)
+                else:
+                    self._copy_file(src, dest)
+        except OSError:
+            return False
+        self._refresh_model()
+        self.selectPath(dest)
+        return True
+
+    def _unique_dest(self, path: str) -> str:
+        """Return ``path``, or ``path (n)`` with the smallest free ``n``."""
+        if not self._exists(path):
+            return path
+        root, ext = os.path.splitext(path)
+        i = 1
+        while self._exists(f"{root} ({i}){ext}"):
+            i += 1
+        return f"{root} ({i}){ext}"
+
+    def _copy_file(self, src: str, dest: str) -> None:
+        if self._fs is not None:
+            self._fs.write_bytes(dest, self._fs.read_bytes(src))
+        else:
+            shutil.copy2(src, dest)
+
+    def _copy_dir(self, src: str, dest: str) -> None:
+        if self._fs is not None:
+            self._fs.makedirs(dest)
+            for name in self._fs.listdir(src):
+                sub_src = os.path.join(src, name)
+                sub_dest = os.path.join(dest, name)
+                if self._fs.isdir(sub_src):
+                    self._copy_dir(sub_src, sub_dest)
+                else:
+                    self._copy_file(sub_src, sub_dest)
+        else:
+            shutil.copytree(src, dest)
+
+    def _move_file(self, src: str, dest: str) -> None:
+        if self._fs is not None:
+            self._fs.rename(src, dest)
+        else:
+            shutil.move(src, dest)
+
+    def _move_dir(self, src: str, dest: str) -> None:
+        if self._fs is not None:
+            self._fs.rename(src, dest)
+        else:
+            shutil.move(src, dest)
 
     # --- FS abstraction helpers --------------------------------------------------
     def _is_file(self, path: str) -> bool:
@@ -245,84 +548,113 @@ class FileTree(QWidget):
                 return os.path.dirname(p)
         return self._root_path
 
-    def _on_context_menu(self, pos) -> None:
+    def _build_context_menu(self, pos):
+        """Build the right-click menu. Returns ``(menu, ctx)`` or ``(None, None)``
+        when the menu does not apply. ``ctx`` carries the selection, the target
+        folder and a dict of the created actions, so the dispatch and tests can
+        work without showing the (modal) menu."""
         sel = self._context_selection(pos)
         target = self._new_target(sel) if sel else self._root_path
         if not target or not self._is_dir(target):
-            return
+            return None, None
         files = [p for p in sel if self._is_file(p)]
         folder = next((p for p in sel if self._is_dir(p)), None)
 
         menu = QMenu(self)
-        act_file = menu.addAction("New File…")
-        act_folder = menu.addAction("New Folder…")
-        act_todo = menu.addAction("New Todo…")
-        act_ws = menu.addAction("New Workspace Here")
-        act_ws.setEnabled(folder is not None)
+        acts = {}
+        acts["file"] = menu.addAction("New File…")
+        acts["folder"] = menu.addAction("New Folder…")
+        acts["todo"] = menu.addAction("New Todo…")
+        acts["ws"] = menu.addAction("New Workspace Here")
+        acts["ws"].setEnabled(folder is not None)
         menu.addSeparator()
-        act_copy = menu.addAction("Copy Absolute Path")
-        act_copy.setEnabled(bool(sel))
-        act_reveal = menu.addAction("Show in File Explorer")
-        act_reveal.setEnabled(bool(sel))
-        act_open = None
-        act_open_left = None
-        act_open_right = None
+        acts["copy"] = menu.addAction("Copy")
+        acts["copy"].setEnabled(bool(sel))
+        acts["cut"] = menu.addAction("Cut")
+        acts["cut"].setEnabled(bool(sel))
+        acts["paste"] = menu.addAction("Paste")
+        acts["paste"].setEnabled(bool(self._file_clipboard))
+        menu.addSeparator()
+        acts["copy_path"] = menu.addAction("Copy Absolute Path")
+        acts["copy_path"].setEnabled(bool(sel))
+        acts["reveal"] = menu.addAction("Show in File Explorer")
+        acts["reveal"].setEnabled(bool(sel))
         if files:
-            act_open = menu.addAction("Open")
+            acts["open"] = menu.addAction("Open")
             menu.addSeparator()
-            act_open_left = menu.addAction("Open in the Left")
-            act_open_right = menu.addAction("Open at the Right")
-        act_rename = None
-        act_move = None
-        act_delete = None
+            acts["open_left"] = menu.addAction("Open in the Left")
+            acts["open_right"] = menu.addAction("Open at the Right")
         if sel:
             menu.addSeparator()
-            act_rename = menu.addAction("Rename…")
-            act_rename.setEnabled(len(sel) == 1)
+            acts["rename"] = menu.addAction("Rename…")
+            acts["rename"].setEnabled(len(sel) == 1)
         if files:
-            act_move = menu.addAction("Move To…")
+            acts["move"] = menu.addAction("Move To…")
         if sel:
             menu.addSeparator()
-            act_delete = menu.addAction("Delete…")
+            acts["delete"] = menu.addAction("Delete…")
 
+        ctx = {"sel": sel, "target": target, "files": files, "folder": folder, "acts": acts}
+        return menu, ctx
+
+    def _on_context_menu(self, pos) -> None:
+        menu, ctx = self._build_context_menu(pos)
+        if menu is None:
+            return
         chosen = menu.exec(QCursor.pos())
-        if chosen is act_file:
+        if chosen is not None:
+            self._dispatch_context(chosen, ctx)
+
+    def _dispatch_context(self, chosen, ctx) -> None:
+        acts = ctx["acts"]
+        sel = ctx["sel"]
+        target = ctx["target"]
+        files = ctx["files"]
+        folder = ctx["folder"]
+        if chosen is acts.get("file"):
             name, ok = QInputDialog.getText(self, "New File", "File name:", text="untitled.txt")
             if ok:
                 self.new_file_in(target, name)
-        elif chosen is act_folder:
+        elif chosen is acts.get("folder"):
             name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="new folder")
             if ok:
                 self.new_folder_in(target, name)
-        elif chosen is act_todo:
+        elif chosen is acts.get("todo"):
             name, ok = QInputDialog.getText(self, "New Todo", "File name:", text="todos.todo")
             if ok:
                 if self.new_todo_in(target, name) is None:
                     QMessageBox.warning(self, "New Todo", "Could not create the Todo file.")
-        elif chosen is act_ws:
+        elif chosen is acts.get("ws"):
             self.create_workspace_here(folder)
-        elif chosen is act_copy:
+        elif chosen is acts.get("copy"):
+            self.copy_files()
+        elif chosen is acts.get("cut"):
+            self.cut_files()
+        elif chosen is acts.get("paste"):
+            if not self.paste_files():
+                QMessageBox.information(self, "Paste", "Nothing to paste here.")
+        elif chosen is acts.get("copy_path"):
             if not self.copy_selected_paths(sel):
                 self.copy_path_to_clipboard(self._root_path or "")
-        elif chosen is act_reveal:
+        elif chosen is acts.get("reveal"):
             self.reveal_selected(sel)
-        elif chosen is act_open:
+        elif chosen is acts.get("open"):
             self.open_selected(sel)
-        elif chosen is act_open_left:
+        elif chosen is acts.get("open_left"):
             for p in files:
                 self.openInGroupRequested.emit(p, "left")
-        elif chosen is act_open_right:
+        elif chosen is acts.get("open_right"):
             for p in files:
                 self.openInGroupRequested.emit(p, "right")
-        elif chosen is act_rename:
+        elif chosen is acts.get("rename"):
             self.rename_selected(sel)
-        elif chosen is act_move:
+        elif chosen is acts.get("move"):
             dest = QFileDialog.getExistingDirectory(self, "Move to folder", os.path.dirname(files[0]))
             if dest:
                 moved = self.move_selected_to(dest, sel)
                 if not moved:
                     QMessageBox.warning(self, "Move", "Could not move any selected file.")
-        elif chosen is act_delete:
+        elif chosen is acts.get("delete"):
             n = len(sel)
             ret = QMessageBox.question(
                 self,

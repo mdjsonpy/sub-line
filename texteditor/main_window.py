@@ -909,6 +909,11 @@ class MainWindow(QMainWindow):
         self._schedule_save()
 
     # --- editor actions (delegate to active pane) ------------------------------
+    def _tree_focused(self) -> bool:
+        """True when keyboard focus is on the file-explorer tree view."""
+        tree = getattr(self._view, "tree", None)
+        return bool(tree is not None and tree.has_tree_focus())
+
     def _delegate(self, method: str) -> None:
         if self.current_workspace() is None:
             return
@@ -918,10 +923,31 @@ class MainWindow(QMainWindow):
 
     def undo(self): self._delegate("undo")
     def redo(self): self._delegate("redo")
-    def cut(self): self._delegate("cut")
-    def copy(self): self._delegate("copy")
-    def paste(self): self._delegate("paste")
-    def select_all(self): self._delegate("selectAll")
+
+    def cut(self):
+        if self._tree_focused():
+            self._view.tree.cut_files()
+        else:
+            self._delegate("cut")
+
+    def copy(self):
+        if self._tree_focused():
+            self._view.tree.copy_files()
+        else:
+            self._delegate("copy")
+
+    def paste(self):
+        if self._tree_focused():
+            self._view.tree.paste_files()
+        else:
+            self._delegate("paste")
+
+    def select_all(self):
+        if self._tree_focused():
+            self._view.tree.select_all_files()
+        else:
+            self._delegate("selectAll")
+
     def format_table(self): self._delegate("format_table")
     def format_all_tables(self): self._delegate("format_all_tables")
 

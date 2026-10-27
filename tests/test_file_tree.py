@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QAbstractItemView
 
 from texteditor.file_tree import FileTree
 from texteditor.todos import BUCKETS, todos_from_dict
@@ -230,3 +230,279 @@ class TestNewWorkspaceHere:
             assert mw._current_index == len(mw._workspaces) - 1
         finally:
             mw.close()
+
+
+class TestFileClipboard:
+    """Copy / cut / paste of files and folders (the internal file clipboard)."""
+
+    def _make(self, tmp_path):
+        ft = make_tree()
+        root = os.fspath(tmp_path)
+        ft.setRoot(root)
+        return ft, root
+
+    def test_copy_file(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        dest_dir = os.path.join(root, "sub")
+        os.makedirs(dest_dir)
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = False
+        assert ft._paste_one(src, dest_dir) is True
+        assert os.path.isfile(src)  # original kept (copy)
+        copied = os.path.join(dest_dir, "a.txt")
+        assert os.path.isfile(copied)
+        with open(copied, encoding="utf-8") as fh:
+            assert fh.read() == "hello"
+
+    def test_copy_dir(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "folder")
+        os.makedirs(os.path.join(src, "nested"))
+        with open(os.path.join(src, "f.txt"), "w") as fh:
+            fh.write("x")
+        with open(os.path.join(src, "nested", "g.txt"), "w") as fh:
+            fh.write("y")
+        dest_dir = os.path.join(root, "dest")
+        os.makedirs(dest_dir)
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = False
+        assert ft._paste_one(src, dest_dir) is True
+        # original intact
+        assert os.path.isdir(src)
+        assert os.path.isfile(os.path.join(src, "f.txt"))
+        # copy created at dest_dir/folder
+        new = os.path.join(dest_dir, "folder")
+        assert os.path.isdir(new)
+        assert os.path.isfile(os.path.join(new, "f.txt"))
+        assert os.path.isfile(os.path.join(new, "nested", "g.txt"))
+
+    def test_move_file(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        dest_dir = os.path.join(root, "sub")
+        os.makedirs(dest_dir)
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = True
+        assert ft._paste_one(src, dest_dir) is True
+        assert not os.path.exists(src)  # original gone (move)
+        assert os.path.isfile(os.path.join(dest_dir, "a.txt"))
+
+    def test_move_dir(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "folder")
+        os.makedirs(src)
+        with open(os.path.join(src, "f.txt"), "w") as fh:
+            fh.write("x")
+        dest_dir = os.path.join(root, "other")
+        os.makedirs(dest_dir)
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = True
+        assert ft._paste_one(src, dest_dir) is True
+        assert not os.path.exists(src)  # original gone (move)
+        new = os.path.join(dest_dir, "folder")
+        assert os.path.isdir(new)
+        assert os.path.isfile(os.path.join(new, "f.txt"))
+
+    def test_paste_collision_renames(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("1")
+        dest_dir = os.path.join(root, "sub")
+        os.makedirs(dest_dir)
+        with open(os.path.join(dest_dir, "a.txt"), "w") as fh:
+            fh.write("2")
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = False
+        assert ft._paste_one(src, dest_dir) is True
+        assert os.path.isfile(src)  # original kept
+        assert os.path.isfile(os.path.join(dest_dir, "a.txt"))  # pre-existing kept
+        assert os.path.isfile(os.path.join(dest_dir, "a (1).txt"))  # pasted as a renamed copy
+
+    def test_paste_dir_into_itself_rejected(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "folder")
+        os.makedirs(os.path.join(src, "inner"))
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = False
+        assert ft._paste_one(src, src) is False  # into itself
+        assert ft._paste_one(src, os.path.join(src, "inner")) is False  # into a subfolder
+
+    def test_paste_missing_source_rejected(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        dest_dir = os.path.join(root, "dest")
+        os.makedirs(dest_dir)
+        ft._file_clipboard = [os.path.join(root, "nope.txt")]
+        ft._file_clipboard_cut = False
+        assert ft._paste_one(os.path.join(root, "nope.txt"), dest_dir) is False
+
+    def test_unique_dest_skips_taken_numbers(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        d = os.path.join(root, "d")
+        os.makedirs(d)
+        with open(os.path.join(d, "x.txt"), "w") as fh:
+            fh.write("1")
+        with open(os.path.join(d, "x (1).txt"), "w") as fh:
+            fh.write("2")
+        # x.txt and x (1).txt are taken -> next free is x (2).txt
+        assert ft._unique_dest(os.path.join(d, "x.txt")) == os.path.join(d, "x (2).txt")
+
+    def test_context_menu_contains_clipboard_actions(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        ft.selectPath(src)
+
+        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
+        assert menu is not None
+        acts = ctx["acts"]
+        assert "copy" in acts and "cut" in acts and "paste" in acts
+        # Paste disabled: internal clipboard empty. Copy/Cut enabled: an item selected.
+        assert acts["paste"].isEnabled() is False
+        assert acts["copy"].isEnabled() is True
+        assert acts["cut"].isEnabled() is True
+        # Menu text is present (for the user) and unique.
+        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        assert texts.count("Copy") == 1
+
+    def test_context_menu_copy_and_paste_dispatch(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        dest_dir = os.path.join(root, "sub")
+        os.makedirs(dest_dir)
+        ft.selectPath(src)
+
+        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
+        # Copy dispatches to the internal clipboard.
+        ft._dispatch_context(ctx["acts"]["copy"], ctx)
+        assert ft._file_clipboard == [os.path.abspath(src)]
+        assert ft._file_clipboard_cut is False
+        # Paste dispatches into the selected folder (here: the root, since a file is selected).
+        ft._dispatch_context(ctx["acts"]["paste"], ctx)
+        assert os.path.isfile(os.path.join(root, "a (1).txt"))
+        assert os.path.isfile(src)  # original kept (copy, not move)
+
+    def test_context_menu_cut_then_paste_moves(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        dest_dir = os.path.join(root, "sub")
+        os.makedirs(dest_dir)
+        ft.selectPath(src)
+
+        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
+        ft._dispatch_context(ctx["acts"]["cut"], ctx)
+        assert ft._file_clipboard_cut is True
+        # Select the destination folder, then paste -> the file moves into it.
+        ft.selectPath(dest_dir)
+        menu, ctx2 = ft._build_context_menu(ft._view.viewport().rect().center())
+        ft._dispatch_context(ctx2["acts"]["paste"], ctx2)
+        assert os.path.isfile(os.path.join(dest_dir, "a.txt"))
+        assert not os.path.exists(src)  # original removed (cut)
+        assert ft._file_clipboard == []  # clipboard cleared after a cut-paste
+
+    def test_context_menu_paste_enabled_when_clipboard_has_items(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        ft._file_clipboard = [src]
+        ft._file_clipboard_cut = False
+        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
+        assert ctx["acts"]["paste"].isEnabled() is True
+
+
+class TestDropFiles:
+    """Drag-and-drop move/copy of files and folders (``FileTree.drop_files``)."""
+
+    def _make(self, tmp_path):
+        qapp()
+        ft = FileTree()
+        root = str(tmp_path)
+        ft.setRoot(root)
+        return ft, root
+
+    def test_drop_move_file(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        dest = os.path.join(root, "sub")
+        os.makedirs(dest)
+        assert ft.drop_files([src], dest, copy=False) is True
+        assert os.path.isfile(os.path.join(dest, "a.txt"))
+        assert not os.path.exists(src)  # moved, original gone
+
+    def test_drop_copy_file(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("hello")
+        dest = os.path.join(root, "sub")
+        os.makedirs(dest)
+        assert ft.drop_files([src], dest, copy=True) is True
+        assert os.path.isfile(os.path.join(dest, "a.txt"))
+        assert os.path.isfile(src)  # original kept (copy)
+
+    def test_drop_move_folder(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "folder")
+        os.makedirs(os.path.join(src, "inner"))
+        with open(os.path.join(src, "inner", "x.txt"), "w") as fh:
+            fh.write("x")
+        dest = os.path.join(root, "dest")
+        os.makedirs(dest)
+        assert ft.drop_files([src], dest, copy=False) is True
+        assert os.path.isfile(os.path.join(dest, "folder", "inner", "x.txt"))
+        assert not os.path.exists(src)
+
+    def test_drop_copy_folder(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "folder")
+        os.makedirs(os.path.join(src, "inner"))
+        with open(os.path.join(src, "inner", "x.txt"), "w") as fh:
+            fh.write("x")
+        dest = os.path.join(root, "dest")
+        os.makedirs(dest)
+        assert ft.drop_files([src], dest, copy=True) is True
+        assert os.path.isfile(os.path.join(dest, "folder", "inner", "x.txt"))
+        assert os.path.isfile(os.path.join(src, "inner", "x.txt"))  # original kept
+
+    def test_drop_collision_renames(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "a.txt")
+        with open(src, "w") as fh:
+            fh.write("src")
+        dest = os.path.join(root, "dest")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "a.txt"), "w") as fh:
+            fh.write("existing")
+        assert ft.drop_files([src], dest, copy=True) is True
+        assert os.path.isfile(os.path.join(dest, "a (1).txt"))
+        assert os.path.isfile(src)
+
+    def test_drop_into_own_subfolder_rejected(self, tmp_path):
+        ft, root = self._make(tmp_path)
+        src = os.path.join(root, "folder")
+        os.makedirs(os.path.join(src, "inner"))
+        assert ft.drop_files([src], os.path.join(src, "inner"), copy=False) is False
+        assert os.path.isdir(src)  # unchanged
+
+    def test_drop_view_is_dnd_enabled(self, tmp_path):
+        from PySide6.QtCore import Qt
+        from texteditor.file_tree import _FileExplorerView
+        ft, root = self._make(tmp_path)
+        assert isinstance(ft._view, _FileExplorerView)
+        assert ft._view.dragDropMode() == QAbstractItemView.DragDrop
+        assert ft._view.dragEnabled() is True
+        assert ft._view.acceptDrops() is True
+        assert ft._view.defaultDropAction() == Qt.MoveAction
