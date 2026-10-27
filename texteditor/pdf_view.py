@@ -90,6 +90,12 @@ class PdfPane(QWidget):
 
         self._view = QPdfView(self)
         self._view.setDocument(doc)
+        # QPdfView defaults to SinglePage mode, which shows only page 1 and relies
+        # on a QML page-navigator (a QObject, not a widget) to turn pages. Show
+        # all pages stacked and fit each to the width so the user can scroll
+        # through the whole document.
+        self._view.setPageMode(QPdfView.PageMode.MultiPage)
+        self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         lay.addWidget(self._view)
 
     # --- Pane protocol -----------------------------------------------------
