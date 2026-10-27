@@ -1,20 +1,25 @@
 # Sub-line
 
-A Sublime-like text editor for Linux, built with Python and PySide6.
-Organize your work into multiple workspaces, split your view, preview images,
-manage todos — and keep sensitive projects inside an **AES-256-GCM encrypted
-vault**.
+A file explorer, text editor, and image viewer for Linux, built with Python
+and PySide6. Organize your work into multiple workspaces, split your view,
+preview images, manage todos — and keep sensitive projects inside an
+**AES-256-GCM encrypted vault**.
 
 ## Features
 
 - **Workspaces** — manage multiple projects side by side, with categories,
   reordering, rename, and persistent layout (window size, split ratio,
   sidebar, zoom, wrap all restored on relaunch).
+- **File tree** — folder sidebar with drag-and-drop move/copy, new file/folder
+  creation, copy path, delete, and "open in file explorer" / "open terminal"
+  context-menu actions.
+- **Quick Open** — fuzzy file finder (Ctrl+P).
 - **Split views** — open the same or different files in parallel panes and
   resize freely.
 - **Syntax highlighting** via Pygments, with automatic encoding detection
   (chardet).
 - **Find & replace** bar, undo/redo, and standard editing shortcuts.
+- **Go to Line** — jump to a specific line (Ctrl+G).
 - **Encrypted workspaces** (see [Encryption](#encryption)):
   - *Lock / Unlock* — while unlocked, contents live **entirely in process
     memory**; no decrypted bytes are ever written to disk. Locking
@@ -114,6 +119,10 @@ texteditor/             # the application package
   todos_pane.py, todos_view.py, todos.py   # todos board
   file_tree.py          # folder sidebar
   find_bar.py           # find & replace
+  quick_open.py         # fuzzy file finder (Ctrl+P)
+  goto_line.py          # go to line dialog (Ctrl+G)
+  status_bar.py         # status bar
+  shortcuts_help.py     # keyboard shortcuts reference
   crypto.py             # AES-GCM vault primitives (no Qt)
   vault.py              # vault lock/unlock lifecycle + crash recovery
   store.py              # workspace/layout/settings persistence (JSON)
@@ -122,6 +131,7 @@ texteditor/             # the application package
   password_dialog.py    # password prompts
   highlighter.py        # Pygments -> QSyntaxHighlighter
   markdown_tables.py    # table formatting
+  md_table_highlighter.py  # markdown table highlighting
   memory_tree_model.py  # in-memory tree model
   workspace_fs.py, workspace_list.py, new_workspace_dialog.py
 tests/                  # pytest suite (crypto, vault, store, tree, ...)
