@@ -30,6 +30,7 @@ from .image_view import image_neighbor
 from .todos_pane import TodosPane
 from .panes import make_pane
 from .store import Workspace
+from .status_bar import StatusBar
 
 
 class _MiddleClickCloseTabBar(QTabBar):
@@ -72,8 +73,9 @@ class WorkspaceView(QWidget):
         self._wrap = True
         self._show_ws = False
         self._zoom = 0
+        self._status_pane = None
 
-        outer = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
@@ -115,6 +117,9 @@ class WorkspaceView(QWidget):
         self._main_splitter.setSizes([240, 800])
 
         outer.addWidget(self._main_splitter)
+
+        self.status_bar = StatusBar(self._theme, self)
+        outer.addWidget(self.status_bar)
 
         if workspace is not None and workspace.root:
             self.set_root(workspace.root)
@@ -222,7 +227,34 @@ class WorkspaceView(QWidget):
         pane = group.currentWidget()
         if pane is not None and hasattr(pane, "undo"):
             self.find_bar.setPane(pane)
+            self._connect_status_cursor(pane)
         self.activePaneChanged.emit(pane)
+        self._update_status_bar()
+
+    def _connect_status_cursor(self, pane) -> None:
+        if not hasattr(pane, "cursorPositionChanged"):
+            return
+        prev = getattr(self, "_status_pane", None)
+        if prev is pane:
+            return
+        if prev is not None and hasattr(prev, "cursorPositionChanged"):
+            try:
+                prev.cursorPositionChanged.disconnect(self._update_status_bar)
+            except (TypeError, RuntimeError):
+                pass
+        pane.cursorPositionChanged.connect(self._update_status_bar)
+        self._status_pane = pane
+
+    def _update_status_bar(self) -> None:
+        group = self._active_group
+        if group is None:
+            self.status_bar.update_from_pane(None)
+            return
+        pane = group.currentWidget()
+        if pane is not None and hasattr(pane, "textCursor"):
+            self.status_bar.update_from_pane(pane)
+        else:
+            self.status_bar.update_from_pane(None)
 
     def _on_focus_changed(self, old, new) -> None:
         """Remember the split group that gains focus, so new files open there."""
