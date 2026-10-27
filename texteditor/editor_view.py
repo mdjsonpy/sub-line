@@ -66,7 +66,7 @@ class EditorPane(QPlainTextEdit):
         self.line_number_area = LineNumberArea(self)
         self.blockCountChanged.connect(self._update_line_number_area_width)
         self.updateRequest.connect(self._update_line_number_area)
-        self.cursorPositionChanged.connect(self._update_line_numbers)
+        self.cursorPositionChanged.connect(self._on_cursor_moved)
 
         doc = self.document()
         doc.modificationChanged.connect(self._on_modification_changed)
@@ -107,7 +107,7 @@ class EditorPane(QPlainTextEdit):
         self._setup_highlighter(path, text)
         self.filepath = path
         self._set_tab_stop()
-        self._refresh_whitespace()
+        self._refresh_extra_selections()
         # reset cursor
         self.moveCursor(QTextCursor.Start)
 
@@ -175,15 +175,49 @@ class EditorPane(QPlainTextEdit):
     # --- whitespace ------------------------------------------------------------
     def setShowWhitespace(self, on: bool) -> None:
         self._show_whitespace = on
-        self._refresh_whitespace()
+        self._refresh_extra_selections()
 
     def showWhitespace(self) -> bool:
         return self._show_whitespace
 
-    def _refresh_whitespace(self) -> None:
-        if not self._show_whitespace:
-            self.setExtraSelections([])
-            return
+    def _make_selection(self, block, index: int, fmt: QTextCharFormat):
+        sel = QTextEdit.ExtraSelection()
+        sel.cursor = QTextCursor(block)
+        sel.cursor.setPosition(block.position() + index)
+        sel.cursor.setPosition(block.position() + index + 1, QTextCursor.KeepAnchor)
+        sel.format = fmt
+        return sel
+
+    # --- cursor moved: line highlight + bracket matching -----------------------
+    _BRACKET_PAIRS = {")": "(", "]": "[", "}": "{", "(": ")", "]": "[", "}": "{", "(": ")", "[": "]", "{": "}"}
+
+    def _on_cursor_moved(self) -> None:
+        self.line_number_area.update()
+        self._refresh_extra_selections()
+
+    def _refresh_extra_selections(self) -> None:
+        selections: list = []
+
+        if self._show_whitespace:
+            selections.extend(self._whitespace_selections())
+
+        # current line highlight
+        cursor = self.textCursor()
+        line_cursor = QTextCursor(cursor.block())
+        line_fmt = QTextCharFormat()
+        line_fmt.setBackground(QColor(30, 30, 30))
+        sel = QTextEdit.ExtraSelection()
+        sel.cursor = line_cursor
+        sel.format = line_fmt
+        selections.append(sel)
+
+        # bracket matching
+        bracket_sels = self._bracket_match_selections()
+        selections.extend(bracket_sels)
+
+        self.setExtraSelections(selections)
+
+    def _whitespace_selections(self) -> list:
         selections = []
         doc = self.document()
         block = doc.begin()
@@ -195,7 +229,6 @@ class EditorPane(QPlainTextEdit):
         tab_fmt.setUnderlineColor(_WS_COLOR)
         while block.isValid():
             text = block.text()
-            # trailing whitespace
             end = len(text)
             start = end
             while start > 0 and text[start - 1] in " \t":
@@ -203,18 +236,46 @@ class EditorPane(QPlainTextEdit):
             if start < end:
                 for i in range(start, end):
                     ch = text[i]
-                    sel = self._make_selection(block, i, space_fmt if ch == " " else tab_fmt)
-                    selections.append(sel)
+                    s = self._make_selection(block, i, space_fmt if ch == " " else tab_fmt)
+                    selections.append(s)
             block = block.next()
-        self.setExtraSelections(selections)
+        return selections
 
-    def _make_selection(self, block, index: int, fmt: QTextCharFormat):
-        sel = QTextEdit.ExtraSelection()
-        sel.cursor = QTextCursor(block)
-        sel.cursor.setPosition(block.position() + index)
-        sel.cursor.setPosition(block.position() + index + 1, QTextCursor.KeepAnchor)
-        sel.format = fmt
-        return sel
+    def _bracket_match_selections(self) -> list:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return []
+        pos = cursor.position()
+        doc = self.document()
+        if pos >= doc.characterCount() - 1:
+            return []
+        ch = doc.characterAt(pos)
+        if ch not in self._BRACKET_PAIRS:
+            return []
+        target = self._BRACKET_PAIRS[ch]
+        # search backwards and forwards
+        for delta in (-1, 1):
+            depth = 0
+            p = pos
+            while True:
+                p += delta
+                if p < 0 or p >= doc.characterCount() - 1:
+                    break
+                c = doc.characterAt(p)
+                if c == ch:
+                    depth += 1
+                elif c == target:
+                    if depth == 0:
+                        fmt = QTextCharFormat()
+                        fmt.setBackground(QColor(60, 60, 40))
+                        sel = QTextEdit.ExtraSelection()
+                        sel.cursor = QTextCursor(doc)
+                        sel.cursor.setPosition(p)
+                        sel.cursor.setPosition(p + 1, QTextCursor.KeepAnchor)
+                        sel.format = fmt
+                        return [sel]
+                    depth -= 1
+        return []
 
     # --- tab / indent ----------------------------------------------------------
     def keyPressEvent(self, event) -> None:  # noqa: N802
