@@ -24,13 +24,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QApplication,
-    QLineEdit,
+    QToolButton,
 )
 from PySide6.QtGui import QCursor, QShortcut, QKeySequence
 from PySide6.QtCore import Signal, QDir, Qt, QModelIndex, QSortFilterProxyModel, QUrl, QMimeData
 
 from .todos import Todos, TodosStore
-from .memory_tree_model import MemoryTreeModel
+from .memory_tree_model import IS_DIR_ROLE, MemoryTreeModel
 
 
 class _FileExplorerView(QTreeView):
@@ -121,6 +121,45 @@ class _FileExplorerView(QTreeView):
             event.ignore()
 
 
+class _TreeProxy(QSortFilterProxyModel):
+    """Proxy that orders folders before files, and files by extension when the
+    *Type* column is the sort key.
+
+    The default proxy sort for ``QFileSystemModel``'s Type column compares the
+    *description* of the type ("text", "image", ...), which is not what the user
+    expects. "Sort by Type" here means grouping by extension: folders first,
+    then files ordered by their extension (then by name within a group).
+    """
+
+    TYPE_COLUMN = 3  # QFileSystemModel "Type" column index
+
+    def _is_dir(self, index: QModelIndex) -> bool:
+        src = self.sourceModel()
+        isdir = getattr(src, "isDir", None)
+        if callable(isdir):
+            return bool(isdir(index))
+        # MemoryTreeModel has no isDir(); it exposes dir-ness via IS_DIR_ROLE.
+        return bool(src.data(index.siblingAtColumn(0), IS_DIR_ROLE))
+
+    def _name(self, index: QModelIndex) -> str:
+        val = self.sourceModel().data(index.siblingAtColumn(0), Qt.DisplayRole)
+        return str(val) if val is not None else ""
+
+    def _ext(self, index: QModelIndex) -> str:
+        return os.path.splitext(self._name(index))[1].lower()
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        left_dir, right_dir = self._is_dir(left), self._is_dir(right)
+        if left_dir != right_dir:
+            return left_dir  # folders always precede files
+        if self.sortColumn() == self.TYPE_COLUMN:
+            left_ext, right_ext = self._ext(left), self._ext(right)
+            if left_ext != right_ext:
+                return left_ext < right_ext
+            return self._name(left).lower() < self._name(right).lower()
+        return super().lessThan(left, right)
+
+
 class FileTree(QWidget):
     fileActivated = Signal(str)
     pathDeleted = Signal(str)
@@ -147,24 +186,29 @@ class FileTree(QWidget):
         self.root_label.setToolTip("")
         layout.addWidget(self.root_label)
 
-        self.search_box = QLineEdit(self)
-        self.search_box.setPlaceholderText("Filter files…")
-        self.search_box.setClearButtonEnabled(True)
-        self.search_box.setStyleSheet(
+        # Current tree sort (column + order); used to render the sort button.
+        self._sort_col = 0
+        self._sort_order = Qt.AscendingOrder
+
+        self.sort_button = QToolButton(self)
+        self.sort_button.setPopupMode(QToolButton.InstantPopup)
+        self.sort_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.sort_button.setStyleSheet(
             "padding: 3px 6px; margin: 2px 6px 4px 6px; font-size: 12px;"
         )
-        layout.addWidget(self.search_box)
+        self.sort_menu = QMenu(self.sort_button)
+        self.sort_button.setMenu(self.sort_menu)
+        self.sort_menu.aboutToShow.connect(self._populate_sort_menu)
+        self._update_sort_button_text()
+        layout.addWidget(self.sort_button)
 
         self._model = QFileSystemModel(self)
         self._model.setFilter(QDir.Files | QDir.Dirs | QDir.NoDotAndDotDot)
         self._model.setRootPath("")
         self._fs_model = self._model  # persistent QFileSystemModel (restored when leaving memory mode)
 
-        self._proxy = QSortFilterProxyModel(self)
+        self._proxy = _TreeProxy(self)
         self._proxy.setSourceModel(self._model)
-        self._proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        self._proxy.setFilterKeyColumn(0)
-        self.search_box.textChanged.connect(self._proxy.setFilterFixedString)
 
         self._view = _FileExplorerView(self, self)
         self._view.setModel(self._proxy)
@@ -222,10 +266,6 @@ class FileTree(QWidget):
         # text clipboard, which is used for "Copy Absolute Path").
         self._file_clipboard: list[str] = []
         self._file_clipboard_cut: bool = False
-
-        # Current tree sort (column + order); used to check the active option.
-        self._sort_col = 0
-        self._sort_order = Qt.AscendingOrder
 
         # Keyboard shortcuts active while the tree has focus. Copy/Cut/Paste are
         # routed from the main window (they collide with the editor's actions);
@@ -529,11 +569,35 @@ class FileTree(QWidget):
         QMessageBox.information(self, "Properties", self.properties_text(paths))
 
     # --- Sort -------------------------------------------------------------------
+    _SORT_LABELS = {0: "Name", 1: "Size", 2: "Modified", 3: "Type"}
+
+    def _sort_columns(self) -> list[tuple[int, str]]:
+        """Available (column, label) pairs; the memory tree is name-only."""
+        if self._is_memory:
+            return [(0, "Name")]
+        return [(0, "Name"), (1, "Size"), (2, "Modified"), (3, "Type")]
+
     def sort_by(self, col: int, order: int) -> None:
         """Sort the tree by ``col`` (0 name, 1 size, 2 modified, 3 type), ``order``."""
         self._sort_col = col
         self._sort_order = order
         self._proxy.sort(col, order)
+        self._update_sort_button_text()
+
+    def _populate_sort_menu(self) -> None:
+        """Rebuild the sort button menu (options depend on memory vs. disk mode)."""
+        self.sort_menu.clear()
+        for col, label in self._sort_columns():
+            for order, glyph in ((Qt.AscendingOrder, "A→Z"), (Qt.DescendingOrder, "Z→A")):
+                a = self.sort_menu.addAction(f"{label}  {glyph}")
+                a.setData((col, order))
+                a.setChecked(col == self._sort_col and order == self._sort_order)
+                a.triggered.connect(lambda _checked=False, c=col, o=order: self.sort_by(c, o))
+
+    def _update_sort_button_text(self) -> None:
+        label = self._SORT_LABELS.get(self._sort_col, "Name")
+        glyph = "A→Z" if self._sort_order == Qt.AscendingOrder else "Z→A"
+        self.sort_button.setText(f"Sort: {label} {glyph}")
 
     def _path_index(self, path: str) -> QModelIndex:
         """Get a proxy QModelIndex from an absolute path, works for both model types."""
@@ -675,24 +739,9 @@ class FileTree(QWidget):
             acts["properties"] = menu.addAction("Properties…")
             acts["properties"].setEnabled(bool(sel))
 
-        # Sort by (always available; only Name for the single-column memory tree).
-        sort_cols = (
-            [(0, "Name")] if self._is_memory
-            else [(0, "Name"), (1, "Size"), (2, "Modified"), (3, "Type")]
-        )
-        sort_acts: list = []
-        sort_menu = menu.addMenu("Sort by")
-        for col, label in sort_cols:
-            for order, glyph in ((Qt.AscendingOrder, "A→Z"), (Qt.DescendingOrder, "Z→A")):
-                a = sort_menu.addAction(f"{label}  {glyph}")
-                a.setData((col, order))
-                if col == self._sort_col and order == self._sort_order:
-                    a.setChecked(True)
-                sort_acts.append(a)
-
         ctx = {
             "sel": sel, "target": target, "files": files, "folder": folder,
-            "acts": acts, "sort_acts": sort_acts,
+            "acts": acts,
         }
         return menu, ctx
 
@@ -768,9 +817,6 @@ class FileTree(QWidget):
                     QMessageBox.warning(self, "Delete", "Some items could not be deleted.")
         elif chosen is acts.get("properties"):
             self.show_properties(sel)
-        elif chosen in ctx.get("sort_acts", []):
-            col, order = chosen.data()
-            self.sort_by(col, order)
 
     # --- filesystem actions -----------------------------------------------------
     def new_file_in(self, dir_path: str, name: str) -> str | None:

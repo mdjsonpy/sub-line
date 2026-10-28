@@ -2,7 +2,7 @@
 
 Covers the three features added to the file tree:
   * right-click "Properties" showing file/folder size (real workspaces only)
-  * right-click "Sort by" (name / size / modified / type, asc / desc)
+  * a top "Sort" button (name / size / modified / type, asc / desc)
   * opening PDF files in a native QtPdf read-only pane (disk and encrypted)
 """
 from __future__ import annotations
@@ -125,10 +125,17 @@ class TestSort:
         finally:
             ft._proxy.sort = orig
 
-    def test_context_menu_has_sort_submenu(self, tmp_path):
+    def test_sort_button_text_reflects_state(self):
+        ft = make_tree()
+        ft.sort_by(0, Qt.AscendingOrder)
+        assert ft.sort_button.text() == "Sort: Name A\u2192Z"
+        ft.sort_by(3, Qt.DescendingOrder)
+        assert ft.sort_button.text() == "Sort: Type Z\u2192A"
+
+    def test_sort_button_menu_has_all_columns(self, tmp_path):
         ft = tree_at(tmp_path)
-        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
-        labels = [a.text() for a in ctx["sort_acts"]]
+        ft._populate_sort_menu()
+        labels = [a.text() for a in ft.sort_menu.actions()]
 
         def has(prefix):
             return any(l.startswith(prefix) for l in labels)
@@ -138,28 +145,28 @@ class TestSort:
         assert len(labels) == 8
         assert sum(1 for l in labels if l.endswith("A\u2192Z")) == 4
 
-    def test_sort_dispatch_by_size(self, tmp_path):
+    def test_sort_menu_action_by_size(self, tmp_path):
         ft = tree_at(tmp_path)
-        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
-        size_act = [a for a in ctx["sort_acts"] if a.text().startswith("Size")][0]
+        ft._populate_sort_menu()
+        size_act = [a for a in ft.sort_menu.actions() if a.text().startswith("Size")][0]
         calls = []
         orig = ft._proxy.sort
         ft._proxy.sort = lambda col, order: calls.append((col, order))
         try:
-            ft._dispatch_context(size_act, ctx)
+            size_act.triggered.emit()
         finally:
             ft._proxy.sort = orig
         assert calls == [(1, Qt.AscendingOrder)]
 
-    def test_sort_dispatch_by_type(self, tmp_path):
+    def test_sort_menu_action_by_type(self, tmp_path):
         ft = tree_at(tmp_path)
-        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
-        type_act = [a for a in ctx["sort_acts"] if a.text().startswith("Type")][0]
+        ft._populate_sort_menu()
+        type_act = [a for a in ft.sort_menu.actions() if a.text().startswith("Type")][0]
         calls = []
         orig = ft._proxy.sort
         ft._proxy.sort = lambda col, order: calls.append((col, order))
         try:
-            ft._dispatch_context(type_act, ctx)
+            type_act.triggered.emit()
         finally:
             ft._proxy.sort = orig
         assert calls == [(3, Qt.AscendingOrder)]
@@ -167,10 +174,60 @@ class TestSort:
     def test_memory_tree_sorts_by_name_only(self, tmp_path):
         """Memory (encrypted) workspaces expose a single-column tree -> Name sort only."""
         ft = tree_at(tmp_path, memory=True)
-        menu, ctx = ft._build_context_menu(ft._view.viewport().rect().center())
-        labels = [a.text() for a in ctx["sort_acts"]]
+        ft._populate_sort_menu()
+        labels = [a.text() for a in ft.sort_menu.actions()]
         assert any(l.startswith("Name") for l in labels)
         assert not any(l.startswith("Size") or l.startswith("Type") for l in labels)
+
+    def test_type_sort_folders_first_then_extension(self, tmp_path):
+        """'Type' sort = folders first, then files by extension, then by name."""
+        import time
+
+        root = os.fspath(tmp_path)
+        os.makedirs(os.path.join(root, "zdir"))  # folder whose name sorts last
+        for name in ("zeta.py", "alpha.md", "mid.md", "beta.c", "noext", "Gamma.PY"):
+            with open(os.path.join(root, name), "w") as fh:
+                fh.write("x")
+
+        ft = tree_at(tmp_path)
+        ft.sort_by(3, Qt.AscendingOrder)
+
+        # QFileSystemModel loads the path chain and its children asynchronously,
+        # so poll until the root node resolves to the right path and all 7
+        # entries are visible.
+        root = os.fspath(tmp_path)
+
+        def visible_names():
+            v = ft._path_index(root)
+            if not v.isValid() or os.path.normpath(ft._model_path(v)) != os.path.normpath(root):
+                return None
+            names = [ft._proxy.data(ft._proxy.index(i, 0, v), Qt.DisplayRole)
+                     for i in range(ft._proxy.rowCount(v))]
+            return names if len(names) >= 7 else None
+
+        app = QApplication.instance()
+        deadline = time.time() + 10.0
+        names = None
+        while time.time() < deadline:
+            names = visible_names()
+            if names is not None:
+                break
+            app.processEvents()
+            time.sleep(0.02)
+
+        # folders first; then by extension (".c" < ".md" < ".py"); name as tie-break
+        assert names == ["zdir", "noext", "beta.c", "alpha.md", "mid.md", "Gamma.PY", "zeta.py"]
+
+        ft.sort_by(3, Qt.DescendingOrder)
+        deadline = time.time() + 10.0
+        names_desc = names
+        while time.time() < deadline:
+            names_desc = visible_names()
+            app.processEvents()
+            time.sleep(0.02)
+            if names_desc == list(reversed(names)):
+                break
+        assert names_desc == list(reversed(names))
 
 
 # --- PDF ---------------------------------------------------------------------

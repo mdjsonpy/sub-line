@@ -1,9 +1,9 @@
 # Sub-line
 
-A mixture of file explorer, text editor, image viewer, and multimedia
-player for Linux, built with Python and PySide6. Organize your work into
-multiple workspaces, split your view, browse images, watch videos, listen
-to audio, manage todos — and keep sensitive projects inside an
+A mixture of file explorer, text editor, image and PDF viewer, and
+multimedia player for Linux, built with Python and PySide6. Organize your
+work into multiple workspaces, split your view, view PDFs, watch videos,
+listen to audio, manage todos — and keep sensitive projects inside an
 **AES-256-GCM encrypted vault**.
 
 ## Features
@@ -12,8 +12,10 @@ to audio, manage todos — and keep sensitive projects inside an
   reordering, rename, and persistent layout (window size, split ratio,
   sidebar, zoom, wrap all restored on relaunch).
 - **File tree** — folder sidebar with drag-and-drop move/copy, new file/folder
-  creation, copy path, delete, and "open in file explorer" / "open terminal"
-  context-menu actions.
+  creation, copy path, delete, a **Sort** button (name / size / modified / type),
+  a **Properties** dialog (type, size, location), and "open in file explorer" /
+  "open terminal" context-menu actions.
+- **Show hidden files** — toggle dotfiles in the tree (View menu, persisted).
 - **Quick Open** — fuzzy file finder (Ctrl+P).
 - **Split views** — open the same or different files in parallel panes and
   resize freely.
@@ -31,6 +33,10 @@ to audio, manage todos — and keep sensitive projects inside an
     with per-collision choices: overwrite, keep vault version, or keep both.
 - **Image preview** — zoom, animated GIFs, and arrow-key navigation between
   neighboring images.
+- **PDF preview** — read-only, all pages stacked and fit to width, rendered
+  natively by QtPdf (no external viewer required).
+- **Large-file guard** — asks before opening text files above 10 MiB and
+  refuses files above 256 MiB, so a huge file can't freeze the editor.
 - **Video playback** — play/pause, seek, mute and volume, with arrow-key
   navigation between neighboring videos in the same folder.
 - **Audio playback** — the same transport controls for music and sound
@@ -46,7 +52,7 @@ to audio, manage todos — and keep sensitive projects inside an
 - Python 3.10+
 - Dependencies (see `requirements.txt`):
   - `PySide6` — GUI toolkit (including QtMultimedia, which powers the
-    video/audio players)
+    video/audio players, and QtPdf, which powers the PDF viewer)
   - `Pygments` — syntax highlighting
   - `chardet` — encoding detection
   - `cryptography` — AES-GCM vault encryption
@@ -120,7 +126,9 @@ texteditor/             # the application package
   pane.py / panes.py    # pane protocol + factory (path -> pane)
   vault_service.py      # encryption orchestration (UI-agnostic)
    editor_view.py        # text pane + syntax highlighting
+   large_file.py         # guard against opening very large text files
    image_view.py         # image preview pane
+   pdf_view.py           # PDF preview pane (QtPdf)
    media.py              # shared media transport + folder navigation
    video_view.py         # video playback pane
    audio_view.py         # audio playback pane
